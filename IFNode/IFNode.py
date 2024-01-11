@@ -263,16 +263,15 @@ def forward_backward(net: torch.nn.Module, x_seq: torch.Tensor):
 if __name__ == '__main__':
     T = 8
     N = 64
-    C = 32 
+    C = 32 * 32 * 32
     device = 'cuda:0'
 
-    # for surrogate_function in surrogate._has_cuda_:
-    for surrogate_function in [surrogate.Sigmoid]:
+    for surrogate_function in surrogate._has_cuda_:
         print(f'surrogate_function = {surrogate_function}')
         net_triton = IFNode(backend='triton', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
         net_cupy = neuron.IFNode(backend='torch', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
 
-        for dtype in [torch.float32]:
+        for dtype in [torch.half, torch.float32]:
             # torch.manual_seed(0)
             x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=dtype)
 

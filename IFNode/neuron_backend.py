@@ -358,7 +358,6 @@ def IFNode_multi_step_forward_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE': 2048},     num_warps=16,  num_stages=4, ),
-        triton.Config({'BLOCK_SIZE': 4096},     num_warps=32, num_stages=8, ),
         triton.Config({'BLOCK_SIZE': 1024},     num_warps=8,  num_stages=4, ),
         triton.Config({'BLOCK_SIZE': 512},      num_warps=4,  num_stages=2, ),
         triton.Config({'BLOCK_SIZE': 256},      num_warps=4,  num_stages=2, ),
