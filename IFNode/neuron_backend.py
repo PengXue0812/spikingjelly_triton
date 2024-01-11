@@ -17,6 +17,48 @@ def ctx_save(ctx, requires_grad: bool, *args, **kwargs):
         for key, value in kwargs.items():
             ctx.__setattr__(key, value)
 
+@triton.jit
+def atan_grad_s_to_h(over_th, alpha, dtype):
+    sg_ATan_M_PI_2__alpha__x = ((1.57079632679489661923) * alpha * over_th).to(dtype)
+    grad_s_to_h = (alpha / 2. / (1. + sg_ATan_M_PI_2__alpha__x * sg_ATan_M_PI_2__alpha__x)).to(dtype)
+    return grad_s_to_h
+
+@triton.jit
+def fakeNumericalGradient_grad_s_to_h(over_th, alpha):
+    sg_FakeNumericalGradient_sign = (over_th >= 0.) * 2. - 1.
+    grad_s_to_h = tl.math.min(sg_FakeNumericalGradient_sign / over_th, alpha)
+    return grad_s_to_h
+
+@triton.jit
+def leakyKReLU_grad_s_to_h(spike, leak, k):
+    sg_LeakyKReLU_mask1 = spike
+    grad_s_to_h = leak * (1. - sg_LeakyKReLU_mask1) + k * sg_LeakyKReLU_mask1
+    return grad_s_to_h
+
+@triton.jit
+def piecewiseLeakyReLU_grad_s_to_h(over_th, spike, w, c):
+    sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th).to(spike.dtype)
+    grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w).to(spike.dtype)
+    return grad_s_to_h
+
+@triton.jit
+def qPseudoSpike_grad_s_to_h(over_th, spike, alpha):
+    sg_QPseudoSpike_base = (1. + 2. / (alpha - 1.) * tl.abs(over_th)).to(spike.dtype)
+    grad_s_to_h = tl.math.pow(sg_QPseudoSpike_base, -alpha).to(spike.dtype)
+    return grad_s_to_h
+
+@triton.jit
+def sigmoid_grad_s_to_h(over_th, alpha):
+    sigmoid_backward__sigmoid_ax = 1. / (1. + tl.exp(-alpha * over_th))
+    grad_s_to_h = (1. - sigmoid_backward__sigmoid_ax) * sigmoid_backward__sigmoid_ax * alpha
+    return grad_s_to_h
+
+@triton.jit
+def s2NN_grad_s_to_h(over_th, spike, alpha, beta):
+    sg_S2NN_sigmoid_ax = (1. / (1. + tl.exp(-alpha * over_th))).to(spike.dtype)
+    sg_S2NN_mask_l = (over_th < 0.).to(spike.dtype)
+    grad_s_to_h =  (1. - sg_S2NN_sigmoid_ax) * sg_S2NN_sigmoid_ax * alpha * sg_S2NN_mask_l + beta / (over_th + 1.00005) * (1. - sg_S2NN_mask_l) 
+    return grad_s_to_h
 
 class SingleStepATGF(torch.autograd.Function):
     @staticmethod
@@ -272,7 +314,7 @@ class MultiStepATGF(torch.autograd.Function):
 # -----------------------
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 2048},     num_warps=16, num_stages=4, ),
+        triton.Config({'BLOCK_SIZE': 2048},     num_warps=16, num_stages=8, ),
         triton.Config({'BLOCK_SIZE': 1024},     num_warps=8,  num_stages=4, ),
         triton.Config({'BLOCK_SIZE': 512},      num_warps=4,  num_stages=2, ),
         triton.Config({'BLOCK_SIZE': 256},      num_warps=4,  num_stages=2, ),
@@ -313,12 +355,9 @@ def IFNode_multi_step_forward_kernel(
         
         tl.store(v_v_seq_ptr + offset + N, v_v_seq_t_plus_dt)
 
-
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_SIZE': 4096 * 4}, num_warps=32, num_stages=10, ),
         triton.Config({'BLOCK_SIZE': 2048},     num_warps=16,  num_stages=4, ),
-        # triton.Config({'BLOCK_SIZE': 4096 * 2}, num_warps=32, num_stages=16, ),
         triton.Config({'BLOCK_SIZE': 4096},     num_warps=32, num_stages=8, ),
         triton.Config({'BLOCK_SIZE': 1024},     num_warps=8,  num_stages=4, ),
         triton.Config({'BLOCK_SIZE': 512},      num_warps=4,  num_stages=2, ),
@@ -363,36 +402,28 @@ def IFNode_multi_step_backward_kernel(
 
         over_th = h_seq - v_th
         spike_seq = (over_th >= 0).to(h_seq.dtype)
-        # ATan
+
+         # ATan
         if surrogate_function == 1: 
-            sg_ATan_M_PI_2__alpha__x = (1.57079632679489661923) * alpha * over_th
-            grad_s_to_h = alpha / 2. / (1. + sg_ATan_M_PI_2__alpha__x * sg_ATan_M_PI_2__alpha__x)
+            grad_s_to_h = atan_grad_s_to_h(over_th, alpha, h_seq.dtype)
         # FakeNumericalGradient
         elif surrogate_function == 2:
-            sg_FakeNumericalGradient_sign = (over_th >= 0.) * 2. - 1.
-            grad_s_to_h = tl.math.min(sg_FakeNumericalGradient_sign / over_th, alpha)
-        # sg_LeakyReLU
+            grad_s_to_h = fakeNumericalGradient_grad_s_to_h(over_th, alpha)
+        # LeakyKReLU
         elif surrogate_function == 3:
-            sg_LeakyKReLU_mask1 = spike_seq
-            grad_s_to_h = leak * (1. - sg_LeakyKReLU_mask1) + k * sg_LeakyKReLU_mask1
+            grad_s_to_h = leakyKReLU_grad_s_to_h(spike_seq, leak, k)
         # PiecewiseLeakyReLU
         elif surrogate_function == 4: 
-            sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th).to(h_seq.dtype)
-            grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w).to(h_seq.dtype)
+            grad_s_to_h = piecewiseLeakyReLU_grad_s_to_h(over_th, spike_seq, w, c)
         # QPseudoSpike
         elif surrogate_function == 5: 
-            sg_QPseudoSpike_base = (1. + 2. / (alpha - 1.) * tl.abs(over_th)).to(h_seq.dtype)
-            grad_s_to_h = tl.math.pow(sg_QPseudoSpike_base, -alpha).to(h_seq.dtype)
+            grad_s_to_h = qPseudoSpike_grad_s_to_h(over_th, spike_seq, alpha)
         # Sigmoid
         elif surrogate_function == 6: 
-            sigmoid_backward__sigmoid_ax = 1. / (1. + tl.exp(-alpha * over_th))
-            grad_s_to_h = (1. - sigmoid_backward__sigmoid_ax) * sigmoid_backward__sigmoid_ax * alpha
+            grad_s_to_h = sigmoid_grad_s_to_h(over_th, alpha)
         # S2NN
         elif surrogate_function == 7: 
-            sg_S2NN_sigmoid_ax = (1. / (1. + tl.exp(-alpha * over_th))).to(h_seq.dtype)
-            sg_S2NN_mask_l = (over_th < 0.).to(h_seq.dtype)
-            grad_s_to_h =  (1. - sg_S2NN_sigmoid_ax) * sg_S2NN_sigmoid_ax * alpha * sg_S2NN_mask_l + beta / (over_th + 1.00005) * (1. - sg_S2NN_mask_l) 
-
+            grad_s_to_h = s2NN_grad_s_to_h(over_th, spike_seq, alpha, beta)
 
         if detach_reset:
             if v_reset is not None: # hard reset
@@ -412,16 +443,12 @@ def IFNode_multi_step_backward_kernel(
     grad_v_init = grad_h
     tl.store(grad_v_init_ptr + offset_n, grad_v_init)
 
-
 # -----------------------
 # IFNode_single_step_kernels
 # -----------------------
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_SIZE': 4096 * 4}, num_warps=32, num_stages=10, ),
         triton.Config({'BLOCK_SIZE': 2048},     num_warps=16,  num_stages=4, ),
-        # triton.Config({'BLOCK_SIZE': 4096 * 2}, num_warps=32, num_stages=16, ),
-        triton.Config({'BLOCK_SIZE': 4096},     num_warps=32, num_stages=8, ),
         triton.Config({'BLOCK_SIZE': 1024},     num_warps=8,  num_stages=4, ),
         triton.Config({'BLOCK_SIZE': 512},      num_warps=4,  num_stages=2, ),
         triton.Config({'BLOCK_SIZE': 256},      num_warps=4,  num_stages=2, ),
@@ -461,10 +488,7 @@ def IFNode_single_step_forward_kernel(
     
 @triton.autotune(
     configs=[
-        # triton.Config({'BLOCK_SIZE': 4096 * 4}, num_warps=32, num_stages=10, ),
-        triton.Config({'BLOCK_SIZE': 2048},     num_warps=16,  num_stages=4, ),
-        # triton.Config({'BLOCK_SIZE': 4096 * 2}, num_warps=32, num_stages=16, ),
-        triton.Config({'BLOCK_SIZE': 4096},     num_warps=32, num_stages=8, ),
+        triton.Config({'BLOCK_SIZE': 2048},     num_warps=16,  num_stages=8, ),
         triton.Config({'BLOCK_SIZE': 1024},     num_warps=8,  num_stages=4, ),
         triton.Config({'BLOCK_SIZE': 512},      num_warps=4,  num_stages=2, ),
         triton.Config({'BLOCK_SIZE': 256},      num_warps=4,  num_stages=2, ),
@@ -504,33 +528,25 @@ def IFNode_single_step_backward_kernel(
     spike = (over_th >= 0).to(grad_spike.dtype)
     # ATan
     if surrogate_function == 1: 
-        sg_ATan_M_PI_2__alpha__x = (1.57079632679489661923) * alpha * over_th
-        grad_s_to_h = alpha / 2. / (1. + sg_ATan_M_PI_2__alpha__x * sg_ATan_M_PI_2__alpha__x)
+        grad_s_to_h = atan_grad_s_to_h(over_th, alpha, h.dtype)
     # FakeNumericalGradient
     elif surrogate_function == 2:
-        sg_FakeNumericalGradient_sign = (over_th >= 0.) * 2. - 1.
-        grad_s_to_h = tl.math.min(sg_FakeNumericalGradient_sign / over_th, alpha)
+        grad_s_to_h = fakeNumericalGradient_grad_s_to_h(over_th, alpha)
      # LeakyKReLU
     elif surrogate_function == 3:
-        sg_LeakyKReLU_mask1 = spike
-        grad_s_to_h = leak * (1. - sg_LeakyKReLU_mask1) + k * sg_LeakyKReLU_mask1
+        grad_s_to_h = leakyKReLU_grad_s_to_h(spike, leak, k)
     # PiecewiseLeakyReLU
     elif surrogate_function == 4: 
-        sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th).to(spike.dtype)
-        grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w).to(spike.dtype)
+        grad_s_to_h = piecewiseLeakyReLU_grad_s_to_h(over_th, spike, w, c)
     # QPseudoSpike
     elif surrogate_function == 5: 
-        sg_QPseudoSpike_base = (1. + 2. / (alpha - 1.) * tl.abs(over_th)).to(spike.dtype)
-        grad_s_to_h = tl.math.pow(sg_QPseudoSpike_base, -alpha).to(spike.dtype)
+        grad_s_to_h = qPseudoSpike_grad_s_to_h(over_th, spike, alpha)
     # Sigmoid
     elif surrogate_function == 6: 
-        sigmoid_backward__sigmoid_ax = 1. / (1. + tl.exp(-alpha * over_th))
-        grad_s_to_h = (1. - sigmoid_backward__sigmoid_ax) * sigmoid_backward__sigmoid_ax * alpha
+        grad_s_to_h = sigmoid_grad_s_to_h(over_th, alpha)
     # S2NN
     elif surrogate_function == 7: 
-        sg_S2NN_sigmoid_ax = (1. / (1. + tl.exp(-alpha * over_th))).to(spike.dtype)
-        sg_S2NN_mask_l = (over_th < 0.).to(spike.dtype)
-        grad_s_to_h =  (1. - sg_S2NN_sigmoid_ax) * sg_S2NN_sigmoid_ax * alpha * sg_S2NN_mask_l + beta / (over_th + 1.00005) * (1. - sg_S2NN_mask_l)
+        grad_s_to_h = s2NN_grad_s_to_h(over_th, spike, alpha, beta)
 
     if detach_reset:
         if v_reset is not None:
