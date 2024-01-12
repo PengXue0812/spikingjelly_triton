@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 import spikingjelly.activation_based.surrogate as surrogate
+import sys
 
 def if_requries_grad(items):
     for item in items:
@@ -13,7 +14,7 @@ def if_requries_grad(items):
                           
 def ctx_save(ctx, requires_grad: bool, *args, **kwargs):
     if requires_grad:
-        ctx.save_for_backward(*args)
+        ctx.save_for_backward(*args) 
         for key, value in kwargs.items():
             ctx.__setattr__(key, value)
 
@@ -212,13 +213,14 @@ class MultiStepATGF(torch.autograd.Function):
         grid = ctx.grid
 
         numel = ctx.numel
-        h_seq = ctx.h_seq
         N = ctx.N
         T = ctx.T
         v_th = ctx.v_th
         v_reset = ctx.v_reset
         detach_reset = ctx.detach_reset
         surrogate_function = ctx.surrogate_function
+
+        h_seq = ctx.saved_tensors[0]
 
         zero_shape = list(grad_spike_seq.shape)
         zero_shape[0] += 1
@@ -227,7 +229,6 @@ class MultiStepATGF(torch.autograd.Function):
         grad_v_init = zero_data[-1]
 
         py_dict = {
-            'grad_spike_seq': grad_spike_seq,
             'grad_v_seq': grad_v_seq,
             'grad_x_seq': grad_x_seq,
             'grad_v_init': grad_v_init,
@@ -264,7 +265,8 @@ class MultiStepATGF(torch.autograd.Function):
             py_dict['N'],
             py_dict['T'],
         )
-        ctx_save(ctx, requires_grad, h_seq=py_dict['h_seq'], grid=grid, 
+
+        ctx_save(ctx, requires_grad, py_dict['h_seq'], grid=grid, 
                             numel=py_dict['numel'], detach_reset=detach_reset,
                             N=py_dict['N'], T=py_dict['T'],
                             v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
@@ -364,7 +366,6 @@ def IFNode_multi_step_forward_kernel(
         triton.Config({'BLOCK_SIZE': 256},      num_warps=4,  num_stages=2, ),
     ],  
     key=['N'],
-
 )    
 @triton.jit
 def IFNode_multi_step_backward_kernel(

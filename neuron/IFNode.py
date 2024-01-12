@@ -6,10 +6,10 @@ from . import neuron_backend
 # import neuron_backend
 
 class IFNode(nn.Module):
-    def __init__(self, v_th: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
-                 backend = 'triton', store_v_seq: bool = False):
+    def __init__(self, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
+                 backend = 'torch', store_v_seq: bool = False):
         super().__init__()
-        self.v_th = v_th
+        self.v_threshold = v_threshold
         
         if v_reset is None:
             self.v = 0.
@@ -50,7 +50,7 @@ class IFNode(nn.Module):
         self.v = self.v + x
 
     def neuronal_fire(self):
-        spike = self.surrogate_function(self.v - self.v_th)
+        spike = self.surrogate_function(self.v - self.v_threshold)
         return spike
     
     def neuronal_reset(self, spike):
@@ -61,7 +61,7 @@ class IFNode(nn.Module):
 
         if self.v_reset is None:
             # soft reset
-            self.v = self.jit_soft_reset(self.v, spike_d, self.v_th)
+            self.v = self.jit_soft_reset(self.v, spike_d, self.v_threshold)
         else:
             # hard reset
             self.v = self.jit_hard_reset(self.v, spike_d, self.v_reset)
@@ -169,7 +169,7 @@ class IFNode(nn.Module):
                 spike_seq, v_seq = neuron_backend.MultiStepATGF.apply(
                                                     x_seq.flatten(1), 
                                                     self.v.flatten(0),
-                                                    self.v_th, self.v_reset,
+                                                    self.v_threshold, self.v_reset,
                                                     self.detach_reset,
                                                     self.surrogate_function,
                                                     forward_kernel,
@@ -263,35 +263,33 @@ if __name__ == '__main__':
     T = 8
     N = 64
     C = 32 * 32 * 32
-    device = 'cuda:0'
+    device = 'cuda:2'
+    for i in range(10):
+        for surrogate_function in surrogate._has_cuda_:
+            print(f'surrogate_function = {surrogate_function}')
+            net_triton = IFNode(backend='triton', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
+            # net_cupy = neuron.IFNode(backend='torch', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
 
-    for surrogate_function in surrogate._has_cuda_:
-        print(f'surrogate_function = {surrogate_function}')
-        net_triton = IFNode(backend='triton', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
-        net_cupy = neuron.IFNode(backend='torch', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
+            for dtype in [torch.float32]:
+                # torch.manual_seed(0)
+                x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=dtype)
 
-        for dtype in [torch.half, torch.float32]:
-            # torch.manual_seed(0)
-            x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=dtype)
+                y_triton = net_triton(x_seq)
+                y_triton.sum().backward()
+                x_grad_triton = x_seq.grad.clone()
+                x_seq.grad.zero_()
+                functional.reset_net(net_triton)
 
-            y_triton = net_triton(x_seq)
-            y_triton.sum().backward()
-            x_grad_triton = x_seq.grad.clone()
-            x_seq.grad.zero_()
-            functional.reset_net(net_triton)
+                print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_triton)}')
+            # y_cupy = net_cupy(x_seq)
+            # y_cupy.sum().backward()
+            # x_grad_cupy = x_seq.grad.clone()
+            # x_seq.grad.zero_()
+            # functional.reset_net(net_cupy)
 
-            y_cupy = net_cupy(x_seq)
-            y_cupy.sum().backward()
-            x_grad_cupy = x_seq.grad.clone()
-            x_seq.grad.zero_()
-            functional.reset_net(net_cupy)
 
-            # diff = x_grad_triton - x_grad_cupy
-            # for i in diff.flatten():
-            #     print(f'i = {i}')
-
-            print(f'dtype = {dtype}, max_error of y_seq =  {max_error(y_triton, y_cupy)}')
-            print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_cupy)}')
+            # print(f'dtype = {dtype}, max_error of y_seq =  {max_error(y_triton, y_cupy)}')
+            # print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_cupy)}')
 
 # if __name__ == '__main__':
 #     N = 64

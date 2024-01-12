@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
 import neuron.IFNode as neuron
-# from spikingjelly.activation_based import neuron
 from spikingjelly.activation_based import functional, surrogate, layer
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -348,7 +347,7 @@ def main():
     if not os.path.exists(pt_dir):
         os.makedirs(pt_dir)
 
-    net = CIFAR10Net(args.channels)
+    net = CIFAR10Net(args.channels).half()
     net.to(args.device)
 
     if args.T == 1:
@@ -404,7 +403,7 @@ def main():
 
             with torch.cuda.device(args.device):
                 with torch.cuda.amp.autocast(enabled=scaler is not None):
-                    img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
+                    img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1).half()
                     y = net(img).mean(0)
                     loss = F.cross_entropy(y, label, label_smoothing=0.1)
 
@@ -439,7 +438,7 @@ def main():
         test_samples = 0
         with torch.no_grad():
             for img, label in test_data_loader:
-                img = img.to(args.device)
+                img = img.to(args.device).half()
                 label = label.to(args.device)
                 img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
             
