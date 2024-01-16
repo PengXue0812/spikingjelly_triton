@@ -248,7 +248,7 @@ class IFNode(nn.Module):
             raise ValueError(self.step_mode)       
 
 class LinearNode(nn.Module):
-    def __init__(self,a: float, b:float, learnable: bool = False, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
+    def __init__(self,a: float=1.0, b:float=1.0, learnable: bool = False, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
                  backend='torch', store_v_seq: bool = False):
         super().__init__()
 
@@ -513,7 +513,7 @@ def forward_backward(net: torch.nn.Module, x_seq: torch.Tensor):
 if __name__ == '__main__':
     T = 8
     N = 64
-    C = 32  * 32 * 32
+    C = 32 * 32 * 32
     device = 'cuda:7'
     # for i in range(10):
     #     for surrogate_function in surrogate._has_cuda_:
@@ -532,29 +532,29 @@ if __name__ == '__main__':
     #             functional.reset_net(net_triton)
 
     #             print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_triton)}')
+   
     with torch.cuda.device(device):
         x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
-        # net_IFNode = IFNode(backend='torch',surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
-        net_IFNode = LinearNode(a=0.1, b=0.9, learnable=True,  backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
-        net_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
 
-        y_IFNode = net_IFNode(x_seq)
-        y_IFNode.sum().backward()
+        torch_LinearNode = LinearNode(a=0.1, b=0.9, learnable=True,  backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+        triton_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+        y_torch = torch_LinearNode(x_seq)
+        y_torch.sum().backward()
         x_grad_IFNode = x_seq.grad.clone()
         x_seq.grad.zero_()
 
-        y_LinearNode = net_LinearNode(x_seq)
-        y_LinearNode.sum().backward()
+        y_triton = triton_LinearNode(x_seq)
+        y_triton.sum().backward()
         x_grad_LinearNode = x_seq.grad.clone()
         x_seq.grad.zero_()
 
-        diff = x_grad_IFNode - x_grad_LinearNode
-
-        print(f'max error of y_IFNode = {max_error(y_IFNode, y_LinearNode)}')
+        print(x_grad_IFNode.shape)
+        print(f'max error of y_torch = {max_error(y_torch, y_triton)}')
         print(f'max error of x_seq.grad = {max_error(x_grad_IFNode, x_grad_LinearNode)}')
 
-    # print(f'dtype = {dtype}, max_error of y_seq =  {max_error(y_triton, y_cupy)}')
-    # print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_cupy)}')
+        print(f'net_IFNode:\na = {torch_LinearNode.a.grad}, b = {torch_LinearNode.b.grad}')
+        print(f'net_LinearNode: \na = {triton_LinearNode.a.grad}, b = {triton_LinearNode.b.grad}')
+
 
 # if __name__ == '__main__':
 #     N = 64
@@ -564,8 +564,9 @@ if __name__ == '__main__':
 
 #     for surrogate_function in surrogate._has_cuda_:
 #         print(f'surrogate_function = {surrogate_function}')
-#         net_triton = IFNode(backend='triton',surrogate_function=surrogate_function(), detach_reset=True)
-#         net_cupy = neuron.IFNode(backend='cupy', surrogate_function=surrogate_function(), step_mode='m', detach_reset=True)
+#         # net_triton = LinearNode(a=1.0, b=1.0, learnable=True, backend='triton',surrogate_function=surrogate_function(), step_mode='m',detach_reset=True)
+#         net_triton = LinearNode(backend='triton', learnable=True, surrogate_function=surrogate_function(), step_mode='m', detach_reset=True)
+#         net_torch = LinearNode(backend='torch', learnable=True, surrogate_function=surrogate_function(), step_mode='m', detach_reset=True)
 
 #         for dtype in [torch.half, torch.float]:
 #             for C in [32 * 32, 32 * 32  * 32, 32 * 32 * 32 * 4, 32 * 32 * 32 * 8]:
@@ -573,7 +574,7 @@ if __name__ == '__main__':
 #                 for T in [2, 4, 8, 16, 32]:
 #                     x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float16)
 
-#                     t_cupy = cuda_utils.cal_fun_t(repeats, device, forward_backward, net_cupy, x_seq)
+#                     t_torch = cuda_utils.cal_fun_t(repeats, device, forward_backward, net_torch, x_seq)
 #                     t_triton = cuda_utils.cal_fun_t(repeats, device, forward_backward, net_triton, x_seq)
 
-#                     print(f'dtype={dtype}, T={T},'.ljust(30), f't_cupy / t_triton = {round(t_cupy / t_triton, 2)}')
+#                     print(f'dtype={dtype}, T={T},'.ljust(30), f'net_torch / t_triton = {round(t_torch / t_triton, 2)}')
