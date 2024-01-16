@@ -247,7 +247,6 @@ class IFNode(nn.Module):
         else:
             raise ValueError(self.step_mode)       
 
-
 class LinearNode(nn.Module):
     def __init__(self,a: float, b:float, learnable: bool = False, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
                  backend='torch', store_v_seq: bool = False):
@@ -414,7 +413,25 @@ class LinearNode(nn.Module):
             if self.backend == 'torch':
                 return self.torch_single_step_forward(x)
             elif self.backend == 'triton':
-                pass
+                forward_kernel, backward_kernel = neuron_backend.LinearNode_single_step_forward_kernel, neuron_backend.LinearNode_single_step_backward_kernel
+
+                self.v_float_to_tensor(x)
+
+                spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
+                                                x.flatten(0),
+                                                self.v.flatten(0),
+                                                self.a.to(x), self.b.to(x),
+                                                self.v_threshold, self.v_reset,
+                                                self.detach_reset,
+                                                self.surrogate_function,
+                                                forward_kernel,
+                                                backward_kernel,
+                                                )
+                spike = spike.reshape(x.shape)
+                v = v.reshape(x.shape)
+
+                self.v = v
+                return spike
             else:
                 raise ValueError(self.backend)
         else:
@@ -433,6 +450,25 @@ class LinearNode(nn.Module):
                 forward_kernel, backward_kernel = neuron_backend.LinearNode_multi_step_forward_kernel, neuron_backend.LinearNode_multi_step_backward_kernel
 
                 self.v_float_to_tensor(x_seq[0])
+
+                spike_seq, v_seq = neuron_backend.LinearNodeMultiStepATGF.apply(
+                                                    x_seq.flatten(1), 
+                                                    self.v.flatten(0),
+                                                    self.a.to(x_seq), self.b.to(x_seq),
+                                                    self.v_threshold, self.v_reset,
+                                                    self.detach_reset,
+                                                    self.surrogate_function,
+                                                    forward_kernel,
+                                                    backward_kernel,
+                                                    )   
+                spike_seq = spike_seq.reshape(x_seq.shape)
+                v_seq = v_seq.reshape(x_seq.shape)
+
+                if self.store_v_seq:
+                    self.v_seq = v_seq
+                
+                self.v = v_seq[-1].clone()
+                return spike_seq
             else:
                 raise ValueError(self.backend)
         else:
@@ -477,8 +513,8 @@ def forward_backward(net: torch.nn.Module, x_seq: torch.Tensor):
 if __name__ == '__main__':
     T = 8
     N = 64
-    C = 32 * 32 * 32
-    device = 'cuda:2'
+    C = 32  * 32 * 32
+    device = 'cuda:7'
     # for i in range(10):
     #     for surrogate_function in surrogate._has_cuda_:
     #         print(f'surrogate_function = {surrogate_function}')
@@ -498,8 +534,9 @@ if __name__ == '__main__':
     #             print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_triton)}')
     with torch.cuda.device(device):
         x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
-        net_IFNode = IFNode(backend='torch',surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
-        net_LinearNode = LinearNode(a=1.0, b=1.0, learnable=True,  backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+        # net_IFNode = IFNode(backend='torch',surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+        net_IFNode = LinearNode(a=0.1, b=0.9, learnable=True,  backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+        net_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
 
         y_IFNode = net_IFNode(x_seq)
         y_IFNode.sum().backward()
@@ -510,7 +547,9 @@ if __name__ == '__main__':
         y_LinearNode.sum().backward()
         x_grad_LinearNode = x_seq.grad.clone()
         x_seq.grad.zero_()
-        
+
+        diff = x_grad_IFNode - x_grad_LinearNode
+
         print(f'max error of y_IFNode = {max_error(y_IFNode, y_LinearNode)}')
         print(f'max error of x_seq.grad = {max_error(x_grad_IFNode, x_grad_LinearNode)}')
 
