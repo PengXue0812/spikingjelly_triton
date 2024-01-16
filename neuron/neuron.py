@@ -264,13 +264,14 @@ class LinearNode(nn.Module):
         self.step_mode = step_mode
         self.backend = backend
         self.store_v_seq = store_v_seq
+        self.learnable = learnable
+        self.a = torch.as_tensor(a)
+        self.b = torch.as_tensor(b)
 
         if learnable:
-            self.a = nn.Parameter(torch.as_tensor(a))
-            self.b = nn.Parameter(torch.as_tensor(b))
-        else:
-            self.a = a
-            self.b = b
+            self.a = nn.Parameter(self.a)
+            self.b = nn.Parameter(self.b)
+         
     
     def v_float_to_tensor(self, x: torch.Tensor):
         if isinstance(self.v, float):
@@ -416,11 +417,12 @@ class LinearNode(nn.Module):
                 forward_kernel, backward_kernel = neuron_backend.LinearNode_single_step_forward_kernel, neuron_backend.LinearNode_single_step_backward_kernel
 
                 self.v_float_to_tensor(x)
-
+                a = self.a.to(x.device) if self.learnable else self.a
+                b = self.b.to(x.device) if self.learnable else self.b
                 spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
                                                 x.flatten(0),
                                                 self.v.flatten(0),
-                                                self.a.to(x), self.b.to(x),
+                                                self.a.to(x_seq.device), self.b.to(x_seq.device), self.learnable,
                                                 self.v_threshold, self.v_reset,
                                                 self.detach_reset,
                                                 self.surrogate_function,
@@ -450,11 +452,10 @@ class LinearNode(nn.Module):
                 forward_kernel, backward_kernel = neuron_backend.LinearNode_multi_step_forward_kernel, neuron_backend.LinearNode_multi_step_backward_kernel
 
                 self.v_float_to_tensor(x_seq[0])
-
                 spike_seq, v_seq = neuron_backend.LinearNodeMultiStepATGF.apply(
                                                     x_seq.flatten(1), 
                                                     self.v.flatten(0),
-                                                    self.a.to(x_seq), self.b.to(x_seq),
+                                                    self.a.to(x_seq.device), self.b.to(x_seq.device), self.learnable,
                                                     self.v_threshold, self.v_reset,
                                                     self.detach_reset,
                                                     self.surrogate_function,
@@ -497,7 +498,6 @@ class LinearNode(nn.Module):
         else:
             raise ValueError(self.step_mode)       
 
-
 @torch.no_grad()
 def max_error(x: torch.Tensor, y: torch.Tensor):
     return (x - y).abs().max()
@@ -515,24 +515,7 @@ if __name__ == '__main__':
     N = 64
     C = 32 * 32 * 32
     device = 'cuda:7'
-    # for i in range(10):
-    #     for surrogate_function in surrogate._has_cuda_:
-    #         print(f'surrogate_function = {surrogate_function}')
-    #         net_triton = IFNode(backend='triton', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
-    #         # net_cupy = neuron.IFNode(backend='torch', step_mode='m', surrogate_function=surrogate_function(), detach_reset=True)
 
-    #         for dtype in [torch.float32]:
-    #             # torch.manual_seed(0)
-    #             x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=dtype)
-
-    #             y_triton = net_triton(x_seq)
-    #             y_triton.sum().backward()
-    #             x_grad_triton = x_seq.grad.clone()
-    #             x_seq.grad.zero_()
-    #             functional.reset_net(net_triton)
-
-    #             print(f'dtype = {dtype}, max error of x_seq.grad = {max_error(x_grad_triton, x_grad_triton)}')
-   
     with torch.cuda.device(device):
         x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
 
