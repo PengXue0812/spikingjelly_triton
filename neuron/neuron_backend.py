@@ -150,9 +150,9 @@ def pre_multi_step_backward(ctx, grad_spike_seq: torch.Tensor, grad_v_seq: torch
     return backward, grid, py_dict
 
 @triton.jit
-def atan_grad_s_to_h(over_th, alpha, dtype):
-    sg_ATan_M_PI_2__alpha__x = ((1.57079632679489661923) * alpha * over_th).to(dtype)
-    grad_s_to_h = (alpha / 2. / (1. + sg_ATan_M_PI_2__alpha__x * sg_ATan_M_PI_2__alpha__x)).to(dtype)
+def atan_grad_s_to_h(over_th, alpha):
+    sg_ATan_M_PI_2__alpha__x = (1.57079632679489661923) * alpha * over_th
+    grad_s_to_h = alpha / 2. / (1. + sg_ATan_M_PI_2__alpha__x * sg_ATan_M_PI_2__alpha__x)
     return grad_s_to_h
 
 @triton.jit
@@ -167,16 +167,22 @@ def leakyKReLU_grad_s_to_h(spike_seq, leak, k):
     grad_s_to_h = leak * (1. - sg_LeakyKReLU_mask1) + k * sg_LeakyKReLU_mask1
     return grad_s_to_h
 
+# @triton.jit
+# def piecewiseLeakyReLU_grad_s_to_h(over_th, dtype, w, c):
+#     sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th).to(dtype)
+#     grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w).to(dtype)
+#     return grad_s_to_h
 @triton.jit
-def piecewiseLeakyReLU_grad_s_to_h(over_th, dtype, w, c):
-    sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th).to(dtype)
-    grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w).to(dtype)
+def piecewiseLeakyReLU_grad_s_to_h(over_th, w, c):
+    sg_PiecewiseLeakyReLU_x_abs = tl.abs(over_th)
+    grad_s_to_h = tl.where(sg_PiecewiseLeakyReLU_x_abs > w, c, 1. / w)
     return grad_s_to_h
 
+
 @triton.jit
-def qPseudoSpike_grad_s_to_h(over_th, dtype, alpha):
-    sg_QPseudoSpike_base = (1. + 2. / (alpha - 1.) * tl.abs(over_th)).to(dtype)
-    grad_s_to_h = tl.math.pow(sg_QPseudoSpike_base, -alpha).to(dtype)
+def qPseudoSpike_grad_s_to_h(over_th, alpha):
+    sg_QPseudoSpike_base = (1. + 2. / (alpha - 1.) * tl.abs(over_th))
+    grad_s_to_h = tl.math.pow(sg_QPseudoSpike_base, -alpha)
     return grad_s_to_h
 
 @triton.jit
@@ -186,29 +192,36 @@ def sigmoid_grad_s_to_h(over_th, alpha):
     return grad_s_to_h
 
 @triton.jit
-def s2NN_grad_s_to_h(over_th, dtype, alpha, beta):
-    sg_S2NN_sigmoid_ax = (1. / (1. + tl.exp(-alpha * over_th))).to(type)
-    sg_S2NN_mask_l = (over_th < 0.).to(dtype)
+def s2NN_grad_s_to_h(over_th, alpha, beta):
+    sg_S2NN_sigmoid_ax = 1. / (1. + tl.exp(-alpha * over_th))
+    sg_S2NN_mask_l = over_th < 0.
     grad_s_to_h =  (1. - sg_S2NN_sigmoid_ax) * sg_S2NN_sigmoid_ax * alpha * sg_S2NN_mask_l + beta / (over_th + 1.00005) * (1. - sg_S2NN_mask_l) 
     return grad_s_to_h
 
 @triton.jit
 def get_grad_s_to_h(surrogate_function, spike_seq, over_th,  alpha, beta, leak, k, w, c):
     dtype = spike_seq.dtype
+    
     if surrogate_function == 1: # ATan
-        return atan_grad_s_to_h(over_th, alpha, dtype)
+        return atan_grad_s_to_h(over_th, alpha)
+    
     if surrogate_function == 2: # FakeNumericalGradient
         return fakeNumericalGradient_grad_s_to_h(over_th, alpha)
+    
     if surrogate_function == 3: # LeakyKReLU
         return leakyKReLU_grad_s_to_h(spike_seq, leak, k)
+    
     if surrogate_function == 4: # PiecewiseLeakyReLU
-        return piecewiseLeakyReLU_grad_s_to_h(over_th, dtype, w, c)
+        return piecewiseLeakyReLU_grad_s_to_h(over_th, w, c)
+    
     if surrogate_function == 5: # QPseudoSpike
-        return qPseudoSpike_grad_s_to_h(over_th, dtype, alpha)
+        return qPseudoSpike_grad_s_to_h(over_th, alpha)
+    
     if surrogate_function == 6: # Sigmoid
         return sigmoid_grad_s_to_h(over_th, alpha)
+    
     if surrogate_function == 7: # S2NN
-        return s2NN_grad_s_to_h(over_th, dtype, alpha, beta)
+        return s2NN_grad_s_to_h(over_th, alpha, beta)
 
 @triton.jit
 def get_grad_v_to_h(spike_seq, h_seq, grad_s_to_h, detach_reset, v_reset, v_th):
@@ -298,7 +311,7 @@ class IFNodeMultiStepATGF(torch.autograd.Function):
         requires_grad, grid, py_dict = pre_multi_step_forward(py_dict)
 
         forward[grid](
-            x_seq,
+            py_dict['x_seq'],
             py_dict['v_v_seq'],
             py_dict['h_seq'],
             py_dict['spike_seq'],
@@ -322,9 +335,11 @@ class IFNodeMultiStepATGF(torch.autograd.Function):
         backward, grid, py_dict = pre_multi_step_backward(ctx, grad_spike_seq, grad_v_seq)
 
         backward[grid](
-                grad_spike_seq.contiguous(),
+                # grad_spike_seq.contiguous(),
+                py_dict['grad_spike_seq'], 
                 py_dict['grad_v_init'],
-                grad_v_seq,
+                # grad_v_seq,
+                py_dict['grad_v_seq'],
                 py_dict['grad_x_seq'],
                 py_dict['h_seq'],
                 py_dict['v_th'],
@@ -723,8 +738,7 @@ def LinearNode_multi_step_forward_kernel(
         x_seq_t = tl.load(x_seq_ptr + offset, mask=mask)
         v_v_seq_t = tl.load(v_v_seq_ptr + offset, mask=mask)
         
-        # h = a * v + b * x
-        h_seq_t = a * v_v_seq_t + b * x_seq_t
+        h_seq_t = (a * v_v_seq_t + b * x_seq_t).to(v_v_seq_t.dtype)
         tl.store(h_seq_ptr + offset, h_seq_t)
         spike_seq_t = h_seq_t >= v_th
         tl.store(spike_seq_ptr + offset, spike_seq_t)
@@ -922,3 +936,7 @@ def LinearNode_single_step_backward_kernel(
 
             tl.atomic_add(grad_a_ptr, grad_a)
             tl.atomic_add(grad_b_ptr, grad_b)
+
+
+
+

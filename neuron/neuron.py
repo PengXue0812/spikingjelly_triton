@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from typing import Callable, Union
-import spikingjelly.activation_based.surrogate as surrogate
+import spikingjelly.activation_based.surrogate as surrogate 
+from spikingjelly.activation_based import neuron
 # from . import neuron_backend
 import neuron_backend
 
@@ -265,8 +266,8 @@ class LinearNode(nn.Module):
         self.backend = backend
         self.store_v_seq = store_v_seq
         self.learnable = learnable
-        self.a = torch.as_tensor(a)
-        self.b = torch.as_tensor(b)
+        self.a = torch.as_tensor(a, dtype=torch.float32)
+        self.b = torch.as_tensor(b, dtype=torch.float32)
 
         if learnable:
             self.a = nn.Parameter(self.a)
@@ -406,7 +407,6 @@ class LinearNode(nn.Module):
 
         if self.store_v_seq:
             self.v_seq = torch.stack(v_seq)
-
         return torch.stack(y_seq)
 
     def single_step_forward(self, x: torch.Tensor,*args, **kwargs):
@@ -417,8 +417,7 @@ class LinearNode(nn.Module):
                 forward_kernel, backward_kernel = neuron_backend.LinearNode_single_step_forward_kernel, neuron_backend.LinearNode_single_step_backward_kernel
 
                 self.v_float_to_tensor(x)
-                a = self.a.to(x.device) if self.learnable else self.a
-                b = self.b.to(x.device) if self.learnable else self.b
+     
                 spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
                                                 x.flatten(0),
                                                 self.v.flatten(0),
@@ -514,29 +513,42 @@ if __name__ == '__main__':
     T = 8
     N = 64
     C = 32 * 32 * 32
-    device = 'cuda:7'
+    device = 'cuda:2'
 
     with torch.cuda.device(device):
-        x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
+        for surrogate in surrogate._has_cuda_:
+            print(f'surrogate = {surrogate}')
+            torch_LinearNode = LinearNode(a=1.0, b=1.0, learnable=False,  backend='triton', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
+            # torch_LinearNode = IFNode(backend='triton', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
+            torch_IFNode = neuron.IFNode(backend='cupy', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
+            # torch_IFNode = LinearNode(a=1.0, b=1.0, learnable=False,  backend='torch', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
 
-        torch_LinearNode = LinearNode(a=0.1, b=0.9, learnable=True,  backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
-        triton_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
-        y_torch = torch_LinearNode(x_seq)
-        y_torch.sum().backward()
-        x_grad_IFNode = x_seq.grad.clone()
-        x_seq.grad.zero_()
+            x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float16)
 
-        y_triton = triton_LinearNode(x_seq)
-        y_triton.sum().backward()
-        x_grad_LinearNode = x_seq.grad.clone()
-        x_seq.grad.zero_()
+            # triton_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
+            torch_LinearNode.train()
+            y_LinearNode = torch_LinearNode(x_seq)
+            y_LinearNode.sum().backward()
+            x_grad_LinearNode = x_seq.grad.clone()
+            x_seq.grad.zero_()
+            functional.reset_net(torch_LinearNode)
 
-        print(x_grad_IFNode.shape)
-        print(f'max error of y_torch = {max_error(y_torch, y_triton)}')
-        print(f'max error of x_seq.grad = {max_error(x_grad_IFNode, x_grad_LinearNode)}')
+            torch_IFNode.train()
+            y_IFNode = torch_IFNode(x_seq)
+            y_IFNode.sum().backward()
+            x_grad_IFNode = x_seq.grad.clone()
+            x_seq.grad.zero_()
+            functional.reset_net(torch_IFNode)
 
-        print(f'net_IFNode:\na = {torch_LinearNode.a.grad}, b = {torch_LinearNode.b.grad}')
-        print(f'net_LinearNode: \na = {triton_LinearNode.a.grad}, b = {triton_LinearNode.b.grad}')
+
+            print(f'max error of y = {max_error(y_LinearNode, y_IFNode)}')
+            print(f'max error of x_seq.grad = {max_error(x_grad_LinearNode, x_grad_IFNode)}')
+
+            # nn.utils.clip_grad_norm_(torch_LinearNode.parameters(), max_norm=1.0)
+            # nn.utils.clip_grad_norm_(triton_LinearNode.parameters(), max_norm=20, norm_type=2)
+
+            # print(f'net_IFNode:\na = {torch_LinearNode.a.grad}, b = {torch_LinearNode.b.grad}')
+            # print(f'net_LinearNode: \na = {triton_LinearNode.a.grad}, b = {triton_LinearNode.b.grad}')
 
 
 # if __name__ == '__main__':
