@@ -1,6 +1,9 @@
+from typing import Any
 import torch
 import triton
 import triton.language as tl
+import spikingjelly.activation_based.surrogate as surrogate
+import sys
 
 map = {'ATan':1, 'FakeNumericalGradient':2, 'LeakyKReLU':3, 'PiecewiseLeakyReLU':4, 'QPseudoSpike':5, 'Sigmoid':6, 'S2NN':7}
 
@@ -49,6 +52,7 @@ def pre_single_step_backward(ctx, grad_spike: torch.Tensor, grad_v_next: torch.T
     zero_shape = list(grad_spike.shape)
     zero_shape[0] *= 2
     zero_data = torch.zeros(zero_shape, device=grad_spike.device, dtype=grad_spike.dtype)
+
     real_numel = grad_spike.size(0) 
     grad_x = zero_data[0: real_numel]
     grad_v = zero_data[real_numel:]
@@ -65,7 +69,6 @@ def pre_single_step_backward(ctx, grad_spike: torch.Tensor, grad_v_next: torch.T
         'N': N,
         'surrogate_function': map[surrogate_function.__class__.__name__],
     }
-
     attributes = ['alpha', 'beta', 'leak', 'k', 'w', 'c']
     for attribute in attributes:
         py_dict[attribute] = getattr(surrogate_function, attribute) if hasattr(surrogate_function, attribute) else None
@@ -106,6 +109,7 @@ def pre_multi_step_backward(ctx, grad_spike_seq: torch.Tensor, grad_v_seq: torch
     zero_data = torch.zeros(zero_shape, device=grad_spike_seq.device, dtype=grad_spike_seq.dtype)
     grad_x_seq = zero_data[0: -1]
     grad_v_init = zero_data[-1]
+
 
     py_dict = {
         'grad_spike_seq_ptr': grad_spike_seq.contiguous(),
@@ -187,8 +191,6 @@ def get_grad_s_to_h(surrogate_function, spike_seq, over_th,  alpha, beta, leak, 
         return sigmoid_grad_s_to_h(over_th, alpha)
     if surrogate_function == 7: # S2NN
         return s2NN_grad_s_to_h(over_th, alpha, beta)
-    
-    raise ValueError('surrogate_function is valid')
 
 @triton.jit
 def get_grad_v_to_h(spike_seq, h_seq, grad_s_to_h, detach_reset, v_reset, v_th):
@@ -223,9 +225,11 @@ class IFNodeSingleStepATGF(torch.autograd.Function):
 
         forward[grid](**py_dict)
 
-        ctx_save(ctx, requires_grad, py_dict['h_ptr'], grid=grid,N=py_dict['N'],
+        ctx_save(ctx, requires_grad, py_dict['h_ptr'], grid=grid,
+                            N=py_dict['N'],
                             v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward,detach_reset=detach_reset,
+                            backward=backward,
+                            detach_reset=detach_reset,
                             surrogate_function=surrogate_function,
                             )
         
@@ -234,9 +238,9 @@ class IFNodeSingleStepATGF(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_spike: torch.Tensor, grad_v_next: torch.Tensor):
         backward, grid, py_dict = pre_single_step_backward(ctx, grad_spike, grad_v_next)
-
+  
         backward[grid](**py_dict)
-        
+
         return py_dict['grad_x_ptr'], py_dict['grad_v_next_ptr'], None, None, None, None, None, None, None
 
 class IFNodeMultiStepATGF(torch.autograd.Function): 
@@ -467,14 +471,18 @@ class LinearNodeSingleStepATGF(torch.autograd.Function):
             'v_reset': v_reset,
             'a_ptr': a,
             'b_ptr': b,
+            'learnable': learnable,
         }
         requires_grad, grid, py_dict = pre_single_step_forward(py_dict)
 
         forward[grid](**py_dict)
 
-        ctx_save(ctx, requires_grad, py_dict['h_ptr'], py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_ptr'], py_dict['x_ptr'], 
-                            learnable=learnable, grid=grid,  detach_reset=detach_reset, N=py_dict['N'], v_th=py_dict['v_th'],
-                            v_reset=py_dict['v_reset'], backward=backward, surrogate_function=surrogate_function,
+        ctx_save(ctx, requires_grad, py_dict['h_ptr'], py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_ptr'], py_dict['x_ptr'], learnable=py_dict['learnable'], grid=grid,
+                            N=py_dict['N'], 
+                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
+                            backward=backward,
+                            detach_reset=detach_reset,
+                            surrogate_function=surrogate_function,
                             )
         
         return py_dict['spike_ptr'], py_dict['v_next_ptr']
@@ -482,18 +490,17 @@ class LinearNodeSingleStepATGF(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_spike: torch.Tensor, grad_v_next: torch.Tensor):
         backward, grid, py_dict = pre_single_step_backward(ctx, grad_spike, grad_v_next)
-
         py_dict['a_ptr'] = ctx.saved_tensors[1]
         py_dict['b_ptr'] = ctx.saved_tensors[2]
         py_dict['v_init_ptr'] = ctx.saved_tensors[3]
         py_dict['x_ptr'] = ctx.saved_tensors[4]
         py_dict['learnable'] = ctx.learnable
-        grad_a_ptr = torch.as_tensor(0., device=grad_spike.device, dtype=torch.float32)
-        grad_b_ptr = torch.as_tensor(0., device=grad_spike.device, dtype=torch.float32)
+        grad_a_ptr = torch.as_tensor(0., device=grad_spike.device, dtype=grad_spike.dtype)
+        grad_b_ptr = torch.as_tensor(0., device=grad_spike.device, dtype=grad_spike.dtype)
 
         backward[grid](grad_a_ptr, grad_b_ptr, **py_dict)
 
-        return py_dict['grad_x_ptr'], py_dict['grad_v_next_ptr'], grad_a_ptr, grad_b_ptr, None, None, None, None, None, None, None
+        return py_dict['grad_x'], py_dict['grad_v_next'], grad_a_ptr , grad_b_ptr, None, None, None, None, None, None, None
 
 class LinearNodeMultiStepATGF(torch.autograd.Function):    
     @staticmethod
@@ -503,32 +510,32 @@ class LinearNodeMultiStepATGF(torch.autograd.Function):
             'x_seq_ptr': x_seq,
             'v_init_ptr': v_init,
             'v_th': v_th,
-            'v_reset': v_reset,     
+            'v_reset': v_reset,
             'a_ptr': a,
-            'b_ptr': b,
+            'b_ptr': b,     
         }
         requires_grad, grid, py_dict = pre_multi_step_forward(py_dict)
 
         forward[grid](**py_dict)
 
-
-        ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][0], py_dict['x_seq_ptr'],  
-                            learnable=learnable, grid=grid, numel=py_dict['numel'], detach_reset=detach_reset,
-                            N=py_dict['N'], T=py_dict['T'], v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward, surrogate_function=surrogate_function)
+        ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][0], py_dict['x_seq_ptr'],  learnable=learnable, 
+                            grid=grid, numel=py_dict['numel'], detach_reset=detach_reset,
+                            N=py_dict['N'], T=py_dict['T'],
+                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
+                            backward=backward,
+                            surrogate_function=surrogate_function)
         return py_dict['spike_seq_ptr'], py_dict['v_v_seq_ptr'][1:,], 
         
     @staticmethod
     def backward(ctx, grad_spike_seq: torch.Tensor, grad_v_seq: torch.Tensor):
         backward, grid, py_dict = pre_multi_step_backward(ctx, grad_spike_seq, grad_v_seq)
-
         py_dict['a_ptr'] = ctx.saved_tensors[1]
         py_dict['b_ptr'] = ctx.saved_tensors[2]
         py_dict['v_seq_ptr'] = ctx.saved_tensors[3]
         py_dict['x_seq_ptr'] = ctx.saved_tensors[4]
         py_dict['learnable'] = ctx.learnable
-        grad_a_ptr = torch.as_tensor(0., device=grad_spike_seq.device, dtype=torch.float32)
-        grad_b_ptr = torch.as_tensor(0., device=grad_spike_seq.device, dtype=torch.float32)
+        grad_a_ptr = torch.as_tensor(0., device=grad_spike_seq.device, dtype=grad_spike_seq.dtype)
+        grad_b_ptr = torch.as_tensor(0., device=grad_spike_seq.device, dtype=grad_spike_seq.dtype)
 
         backward[grid](grad_a_ptr, grad_b_ptr, **py_dict)
 
@@ -596,8 +603,8 @@ def LinearNode_multi_step_forward_kernel(
 )
 @triton.jit
 def LinearNode_multi_step_backward_kernel(
-    grad_a_ptr, # [1] Input
-    grad_b_ptr, # [1] Input
+    grad_a_ptr, # [1] output
+    grad_b_ptr, # [1] output
     grad_spike_seq_ptr, # [T, N]
     grad_v_init_ptr, # [N] ,output
     grad_v_seq_ptr, # [T, N]
@@ -614,10 +621,10 @@ def LinearNode_multi_step_backward_kernel(
     numel,
     N: tl.constexpr, # num of col in grad_spike_seq
     T: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     surrogate_function: tl.constexpr,
     # *args,
     alpha, beta, leak, k, w, c,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offset_n = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -640,7 +647,7 @@ def LinearNode_multi_step_backward_kernel(
         grad_s_to_h = get_grad_s_to_h(surrogate_function, spike_seq, over_th, alpha, beta, leak, k, w, c)
         grad_v_to_h = get_grad_v_to_h(spike_seq, h_seq, grad_s_to_h, detach_reset, v_reset, v_th)
 
-        grad_h = grad_spike_seq * grad_s_to_h + (grad_v_seq + grad_h  * grad_h_next_to_v) * grad_v_to_h
+        grad_h = (grad_spike_seq * grad_s_to_h + (grad_v_seq + grad_h  * grad_h_next_to_v) * grad_v_to_h).to(h_seq.dtype)
         # h = a * v + b * x
         tl.store(grad_x_seq_ptr + offset, grad_h * grad_h_to_x)    
 
@@ -734,10 +741,10 @@ def LinearNode_single_step_backward_kernel(
     v_reset,
     detach_reset,
     N: tl.constexpr,  
+    BLOCK_SIZE: tl.constexpr,
     surrogate_function: tl.constexpr,
     # *args,
     alpha, beta, leak, k, w, c,
-    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if pid < tl.num_programs(axis=0):
@@ -770,4 +777,3 @@ def LinearNode_single_step_backward_kernel(
 
             tl.atomic_add(grad_a_ptr, grad_a)
             tl.atomic_add(grad_b_ptr, grad_b)
-
