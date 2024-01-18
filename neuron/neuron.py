@@ -1,14 +1,88 @@
 import torch
 import torch.nn as nn
-from typing import Callable, Union
+from typing import Callable
 import spikingjelly.activation_based.surrogate as surrogate 
-from spikingjelly.activation_based import neuron
+from torch.cuda.amp import autocast
+
 # from . import neuron_backend
 import neuron_backend
 
 class IFNode(nn.Module):
     def __init__(self, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
                  backend = 'torch', store_v_seq: bool = False):
+        """
+        * :ref:`API in English <IFNode.__init__-en>`
+
+        .. _IFNode.__init__-cn:
+
+        :param v_threshold: 神经元的阈值电压
+        :type v_threshold: float
+
+        :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
+            如果设置为 ``None``，当神经元释放脉冲后，电压会被减去 ``v_threshold``
+        :type v_reset: float
+
+        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
+        :type surrogate_function: Callable
+
+        :param detach_reset: 是否将reset过程的计算图分离
+        :type detach_reset: bool
+
+        :param step_mode: 步进模式，可以为 `'s'` (单步) 或 `'m'` (多步)
+        :type step_mode: str
+
+        :param backend: 使用那种后端。不同的 ``step_mode`` 可能会带有不同的后端。可以通过打印 ``self.supported_backends`` 查看当前
+            使用的步进模式支持的后端。在支持的情况下，使用 ``'cupy'`` 后端是速度最快的
+        :type backend: str
+
+        :param store_v_seq: 在使用 ``step_mode = 'm'`` 时，给与 ``shape = [T, N, *]`` 的输入后，是否保存中间过程的 ``shape = [T, N, *]``
+            的各个时间步的电压值 ``self.v_seq`` 。设置为 ``False`` 时计算完成后只保留最后一个时刻的电压，即 ``shape = [N, *]`` 的 ``self.v`` 。
+            通常设置成 ``False`` ，可以节省内存
+        :type store_v_seq: bool
+
+        Integrate-and-Fire 神经元模型，可以看作理想积分器，无输入时电压保持恒定，不会像LIF神经元那样衰减。其阈下神经动力学方程为：
+
+        .. math::
+            H[t] = V[t-1] + X[t]
+
+        * :ref:`中文API <IFNode.__init__-cn>`
+
+        .. _IFNode.__init__-en:
+
+        :param v_threshold: threshold of this neurons layer
+        :type v_threshold: float
+
+        :param v_reset: reset voltage of this neurons layer. If not ``None``, the neuron's voltage will be set to ``v_reset``
+            after firing a spike. If ``None``, the neuron's voltage will subtract ``v_threshold`` after firing a spike
+        :type v_reset: float
+
+        :param surrogate_function: the function for calculating surrogate gradients of the heaviside step function in backward
+        :type surrogate_function: Callable
+
+        :param detach_reset: whether detach the computation graph of reset in backward
+        :type detach_reset: bool
+
+        :param step_mode: the step mode, which can be `s` (single-step) or `m` (multi-step)
+        :type step_mode: str
+
+        :param backend: backend fot this neurons layer. Different ``step_mode`` may support for different backends. The user can
+        print ``self.supported_backends`` and check what backends are supported by the current ``step_mode``. If supported,
+        using ``'cupy'`` backend will have the fastest training speed
+        :type backend: str
+
+        :param store_v_seq: when using ``step_mode = 'm'`` and given input with ``shape = [T, N, *]``, this option controls
+            whether storing the voltage at each time-step to ``self.v_seq`` with ``shape = [T, N, *]``. If set to ``False``,
+            only the voltage at last time-step will be stored to ``self.v`` with ``shape = [N, *]``, which can reduce the
+            memory consumption
+        :type store_v_seq: bool
+
+        The Integrate-and-Fire neuron, which can be seen as a ideal integrator. The voltage of the IF neuron will not decay
+        as that of the LIF neuron. The sub-threshold neural dynamics of it is as followed:
+
+        .. math::
+            H[t] = V[t-1] + X[t]
+
+        """
         super().__init__()
         self.v_threshold = v_threshold
         
@@ -18,7 +92,7 @@ class IFNode(nn.Module):
             self.v = v_reset
 
         self.v_reset = v_reset
-        self.detach_reset = detach_reset # 是否将reset过程的计算图分离
+        self.detach_reset = detach_reset 
         self.surrogate_function = surrogate_function
         self.step_mode = step_mode
         self.backend = backend
@@ -66,7 +140,6 @@ class IFNode(nn.Module):
         else:
             # hard reset
             self.v = self.jit_hard_reset(self.v, spike_d, self.v_reset)
-    
 
     @staticmethod
     @torch.jit.script
@@ -158,7 +231,7 @@ class IFNode(nn.Module):
 
         return torch.stack(y_seq)   
 
-    def multi_step_forward(self, x_seq: torch.Tensor, *args, **kwargs):
+    def multi_step_forward(self, x_seq: torch.Tensor):
         if self.training:
             if self.backend == 'torch':
                 return self.torch_multi_step_forward(x_seq)
@@ -207,7 +280,7 @@ class IFNode(nn.Module):
                                                                                     self.v_reset)
             return spike_seq       
    
-    def single_step_forward(self, x: torch.Tensor,*args, **kwargs):
+    def single_step_forward(self, x: torch.Tensor):
         if self.training:
             if self.backend == 'torch':
                 return self.torch_single_step_forward(x)
@@ -387,13 +460,15 @@ class LinearNode(nn.Module):
             v_seq[t] = v
         return spike_seq, v, v_seq
 
+    @autocast() 
     def torch_single_step_forward(self, x: torch.Tensor):
         self.v_float_to_tensor(x)
         self.neuronal_charge(x)
         spike = self.neruonal_fire()
         self.neuronal_reset(spike)
         return spike
-    
+
+    @autocast() 
     def torch_multi_step_forward(self, x_seq: torch.Tensor):
         T = x_seq.shape[0]
         y_seq = []
@@ -409,7 +484,7 @@ class LinearNode(nn.Module):
             self.v_seq = torch.stack(v_seq)
         return torch.stack(y_seq)
 
-    def single_step_forward(self, x: torch.Tensor,*args, **kwargs):
+    def single_step_forward(self, x: torch.Tensor):
         if self.training:
             if self.backend == 'torch':
                 return self.torch_single_step_forward(x)
@@ -421,7 +496,7 @@ class LinearNode(nn.Module):
                 spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
                                                 x.flatten(0),
                                                 self.v.flatten(0),
-                                                self.a.to(x_seq.device), self.b.to(x_seq.device), self.learnable,
+                                                self.a.to(x.device), self.b.to(x.device), self.learnable,
                                                 self.v_threshold, self.v_reset,
                                                 self.detach_reset,
                                                 self.surrogate_function,
@@ -443,7 +518,7 @@ class LinearNode(nn.Module):
                 spike, self.v = self.jit_eval_single_step_forward_hard_reset(x, self.v, self.v_threshold, self.v_reset)
             return spike
 
-    def multi_step_forward(self, x_seq: torch.Tensor, *args, **kwargs):
+    def multi_step_forward(self, x_seq: torch.Tensor):
         if self.training:
             if self.backend == 'torch':
                 return self.torch_multi_step_forward(x_seq)
@@ -516,16 +591,12 @@ if __name__ == '__main__':
     device = 'cuda:2'
 
     with torch.cuda.device(device):
-        for surrogate in surrogate._has_cuda_:
-            print(f'surrogate = {surrogate}')
-            torch_LinearNode = LinearNode(a=1.0, b=1.0, learnable=False,  backend='triton', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
-            # torch_LinearNode = IFNode(backend='triton', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
-            torch_IFNode = neuron.IFNode(backend='cupy', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
-            # torch_IFNode = LinearNode(a=1.0, b=1.0, learnable=False,  backend='torch', surrogate_function=surrogate(), step_mode='m', detach_reset=True)
+        # for surrogate in surrogate._has_cuda_:
+            torch_LinearNode = LinearNode(a=1.0, b=1.0, learnable=True, backend='triton', surrogate_function=surrogate.ATan(), step_mode='m', detach_reset=True)
+            torch_IFNode = LinearNode(a=1.0, b=1.0, learnable=True, backend='torch', surrogate_function=surrogate.ATan(), step_mode='m', detach_reset=True)
 
             x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float16)
 
-            # triton_LinearNode =  LinearNode(a=0.1, b=0.9, learnable=True,  backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', detach_reset=True)
             torch_LinearNode.train()
             y_LinearNode = torch_LinearNode(x_seq)
             y_LinearNode.sum().backward()
@@ -533,22 +604,21 @@ if __name__ == '__main__':
             x_seq.grad.zero_()
             functional.reset_net(torch_LinearNode)
 
-            torch_IFNode.train()
-            y_IFNode = torch_IFNode(x_seq)
-            y_IFNode.sum().backward()
-            x_grad_IFNode = x_seq.grad.clone()
-            x_seq.grad.zero_()
-            functional.reset_net(torch_IFNode)
+            with autocast():    
+                torch_IFNode.train()
+                y_IFNode = torch_IFNode(x_seq)
+                y_IFNode.sum().backward()
+                x_grad_IFNode = x_seq.grad.clone()
+                x_seq.grad.zero_()
+                functional.reset_net(torch_IFNode)
 
 
             print(f'max error of y = {max_error(y_LinearNode, y_IFNode)}')
             print(f'max error of x_seq.grad = {max_error(x_grad_LinearNode, x_grad_IFNode)}')
+            print(x_grad_IFNode.dtype)
 
-            # nn.utils.clip_grad_norm_(torch_LinearNode.parameters(), max_norm=1.0)
-            # nn.utils.clip_grad_norm_(triton_LinearNode.parameters(), max_norm=20, norm_type=2)
-
-            # print(f'net_IFNode:\na = {torch_LinearNode.a.grad}, b = {torch_LinearNode.b.grad}')
-            # print(f'net_LinearNode: \na = {triton_LinearNode.a.grad}, b = {triton_LinearNode.b.grad}')
+            print(f'net_IFNode:\na = {torch_LinearNode.a.grad}, b = {torch_LinearNode.b.grad}')
+            print(f'net_LinearNode: \na = {torch_IFNode.a.grad.dtype}, b = {torch_IFNode.b.grad.dtype}')
 
 
 # if __name__ == '__main__':
