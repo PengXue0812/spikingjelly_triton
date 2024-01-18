@@ -2,8 +2,6 @@ from typing import Any
 import torch
 import triton
 import triton.language as tl
-import spikingjelly.activation_based.surrogate as surrogate
-import sys
 
 map = {'ATan':1, 'FakeNumericalGradient':2, 'LeakyKReLU':3, 'PiecewiseLeakyReLU':4, 'QPseudoSpike':5, 'Sigmoid':6, 'S2NN':7}
 
@@ -12,8 +10,8 @@ def if_requries_grad(items):
         if isinstance(item, torch.Tensor):
             if item.requires_grad:
                 return True
-    return False
-                          
+    return False              
+
 def ctx_save(ctx, requires_grad: bool, *args, **kwargs):
     if requires_grad:
         ctx.save_for_backward(*args) 
@@ -226,12 +224,9 @@ class IFNodeSingleStepATGF(torch.autograd.Function):
         forward[grid](**py_dict)
 
         ctx_save(ctx, requires_grad, py_dict['h_ptr'], grid=grid,
-                            N=py_dict['N'],
-                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward,
-                            detach_reset=detach_reset,
-                            surrogate_function=surrogate_function,
-                            )
+                 N=py_dict['N'], v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
+                 backward=backward,detach_reset=detach_reset,
+                 surrogate_function=surrogate_function)
         
         return py_dict['spike_ptr'], py_dict['v_next_ptr']
     
@@ -258,11 +253,11 @@ class IFNodeMultiStepATGF(torch.autograd.Function):
         forward[grid](**py_dict)
 
         ctx_save(ctx, requires_grad, py_dict['h_seq_ptr'], grid=grid, 
-                            numel=py_dict['numel'], detach_reset=detach_reset,
-                            N=py_dict['N'], T=py_dict['T'],
-                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward,
-                            surrogate_function=surrogate_function)
+                 numel=py_dict['numel'], detach_reset=detach_reset,
+                 N=py_dict['N'], T=py_dict['T'],v_th=py_dict['v_th'], 
+                 v_reset=py_dict['v_reset'],backward=backward,
+                 surrogate_function=surrogate_function)
+        
         return py_dict['spike_seq_ptr'], py_dict['v_v_seq_ptr'][1:,]
             
     @staticmethod
@@ -477,13 +472,11 @@ class LinearNodeSingleStepATGF(torch.autograd.Function):
 
         forward[grid](**py_dict)
 
-        ctx_save(ctx, requires_grad, py_dict['h_ptr'], py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_ptr'], py_dict['x_ptr'], learnable=learnable, grid=grid,
-                            N=py_dict['N'], 
-                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward,
-                            detach_reset=detach_reset,
-                            surrogate_function=surrogate_function,
-                            )
+        ctx_save(ctx, requires_grad, py_dict['h_ptr'], py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_ptr'], py_dict['x_ptr'],
+                 learnable=learnable, grid=grid, N=py_dict['N'], 
+                 v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
+                 backward=backward, detach_reset=detach_reset,
+                 surrogate_function=surrogate_function,)
         
         return py_dict['spike_ptr'], py_dict['v_next_ptr']
     
@@ -518,12 +511,12 @@ class LinearNodeMultiStepATGF(torch.autograd.Function):
 
         forward[grid](**py_dict)
 
-        ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][0], py_dict['x_seq_ptr'],  learnable=learnable, 
-                            grid=grid, numel=py_dict['numel'], detach_reset=detach_reset,
-                            N=py_dict['N'], T=py_dict['T'],
-                            v_th=py_dict['v_th'], v_reset=py_dict['v_reset'],
-                            backward=backward,
-                            surrogate_function=surrogate_function)
+        ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][0], py_dict['x_seq_ptr'],
+                 learnable=learnable, grid=grid, numel=py_dict['numel'], detach_reset=detach_reset,
+                 N=py_dict['N'], T=py_dict['T'],v_th=py_dict['v_th'], 
+                 v_reset=py_dict['v_reset'],backward=backward,
+                 surrogate_function=surrogate_function)
+        
         return py_dict['spike_seq_ptr'], py_dict['v_v_seq_ptr'][1:,], 
         
     @staticmethod
