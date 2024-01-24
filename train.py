@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
-import neuron.IFNode as neuron
+import neuron_new.neuron as neuron
 from spikingjelly.activation_based import functional, surrogate, layer
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -223,7 +223,7 @@ class RandomCutmix(torch.nn.Module):
         return s
 
 class CIFAR10Net(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, T, tau):
         super().__init__()
         conv = []
         for i in range(2):
@@ -234,7 +234,8 @@ class CIFAR10Net(nn.Module):
                     in_channels = channels
                 conv.append(layer.Conv2d(in_channels, channels, kernel_size=3, padding=1, bias=False)) 
                 conv.append(layer.BatchNorm2d(channels))
-                conv.append(neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='m', backend='triton'))
+                # conv.append(neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='m', backend='triton'))
+                conv.append(neuron.ParallelNode(T, tau, surrogate_function=surrogate.ATan()))
 
             conv.append(layer.AvgPool2d(2, 2))
 
@@ -244,7 +245,8 @@ class CIFAR10Net(nn.Module):
         self.fc = nn.Sequential(
             layer.Flatten(),
             layer.Linear(channels * 8 * 8, channels * 8 * 8 // 4),
-            neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='m', backend='triton'),
+            # neuron.IFNode(surrogate_function=surrogate.ATan(), detach_reset=True, step_mode='m', backend='triton'),
+            neuron.ParallelNode(T, tau, surrogate_function=surrogate.ATan()),
             layer.Linear(channels * 8 * 8 // 4, 10),
         )
 
@@ -271,7 +273,7 @@ def main():
     # print(params(CIFAR10Net(128)))
     # exit()
     parser = argparse.ArgumentParser(description='Classify Fashion-MNIST')
-    parser.add_argument('-device', default='cuda:2', help='device')
+    parser.add_argument('-device', default='cuda:1', help='device')
     parser.add_argument('-b', default=128, type=int, help='batch size')
     parser.add_argument('-epochs', default=64, type=int, metavar='N',
                         help='number of total epochs to run')
@@ -286,6 +288,7 @@ def main():
     parser.add_argument('-lr', default=0.1, type=float, help='learning rate')
     parser.add_argument('-channels', default=128, type=int, help='channels of CSNN')
     parser.add_argument('-T', default=4, type=int)
+    parser.add_argument('-tau', default=5, type=int)
 
 
 
@@ -338,7 +341,7 @@ def main():
         num_workers=args.j,
         pin_memory=True
     )
-    out_dir = f'T_{args.T}_e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
+    out_dir = f'T_{args.T}_tau{args.tau}_e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
     if args.amp:
         out_dir += '_amp'
 
@@ -347,7 +350,7 @@ def main():
     if not os.path.exists(pt_dir):
         os.makedirs(pt_dir)
 
-    net = CIFAR10Net(args.channels).half()
+    net = CIFAR10Net(args.channels, args.T, args.tau)
     net.to(args.device)
 
     if args.T == 1:
@@ -403,7 +406,7 @@ def main():
 
             with torch.cuda.device(args.device):
                 with torch.cuda.amp.autocast(enabled=scaler is not None):
-                    img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1).half()
+                    img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
                     y = net(img).mean(0)
                     loss = F.cross_entropy(y, label, label_smoothing=0.1)
 
@@ -438,7 +441,7 @@ def main():
         test_samples = 0
         with torch.no_grad():
             for img, label in test_data_loader:
-                img = img.to(args.device).half()
+                img = img.to(args.device)
                 label = label.to(args.device)
                 img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
             

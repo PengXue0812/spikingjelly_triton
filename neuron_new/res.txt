@@ -1,0 +1,14 @@
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 1
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 3
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 5
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 8
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 10
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 15
+
+Executing command: python train.py -data-dir /datasets/CIFAR10 --amp --opt sgd --channels 128 --epochs 64 -tau 20
+

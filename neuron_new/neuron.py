@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 from typing import Callable
 import spikingjelly.activation_based.surrogate as surrogate
-from spikingjelly.activation_based import base 
-import neuron_backend
+from spikingjelly.activation_based import base
+import math
+from . import neuron_backend
+# import neuron_backend
 
 # -----------------------
 # charge function
@@ -52,7 +54,7 @@ def neuronal_reset(h: torch.Tensor, spike: torch.Tensor, detach_reset: bool, v_r
 class BaseNode(base.MemoryModule):
     def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False,
-                 step_mode='s', backend='torch', store_v_seq: bool = False):
+                 step_mode='s', backend='torch', store_hidden_states: bool = False):
         assert isinstance(v_reset, float) or v_reset is None
         assert isinstance(v_threshold, float)
         assert isinstance(detach_reset, bool)
@@ -67,27 +69,27 @@ class BaseNode(base.MemoryModule):
         self.v_threshold = v_threshold
         self.v_reset = v_reset
 
-        self.detach_reset = detach_reset 
+        self.detach_reset = detach_reset
         self.surrogate_function = surrogate_function
         
         self.step_mode = step_mode
         self.backend = backend
         
-        self.store_v_seq = store_v_seq
-
-        # used in lava_exchange
-        self.lava_s_cale = 1 << 6
+        self.store_hidden_states = store_hidden_states
     
     @property
-    def store_v_seq(self):
-        return self._store_v_seq
+    def store_hidden_states(self):
+        return self._store_hidden_states
 
-    @store_v_seq.setter
-    def store_v_seq(self, value: bool):
-        self._store_v_seq = value
+    @store_hidden_states.setter
+    def store_hidden_states(self, value: bool):
+        self._store_hidden_states = value
         if value:
             if not hasattr(self, 'v_seq'):
                 self.register_memory('v_seq', None)
+            if not hasattr(self, 'h_seq'):
+                self.register_memory('h_seq', None)
+
 
     @abstractmethod
     def neuronal_charge(self, x: torch.Tensor):
@@ -101,24 +103,27 @@ class BaseNode(base.MemoryModule):
      
     def single_step_forward(self, x: torch.Tensor):
         self.v_float_to_tensor(x)
-        h = self.neuronal_charge(x)
-        spike = self.neuronal_fire(h)
-        self.v = self.neuronal_reset(h, spike)
+        self.h = self.neuronal_charge(x)
+        spike = self.neuronal_fire(self.h)
+        self.v = self.neuronal_reset(self.h, spike)
 
         return spike
 
     def multi_step_forward(self, x_seq: torch.Tensor):
         T = x_seq.shape[0]
         y_seq = []
-        if self.store_v_seq:
+        if self.store_hidden_states:
+            h_seq = []
             v_seq = []
         for t in range(T):
             y = self.single_step_forward(x_seq[t])
             y_seq.append(y)
-            if self.store_v_seq:
+            if self.store_hidden_states:
+                h_seq.append(self.h)
                 v_seq.append(self.v)
 
-        if self.store_v_seq:
+        if self.store_hidden_states:
+            self.h_seq = torch.stack(h_seq)
             self.v_seq = torch.stack(v_seq)
 
         return torch.stack(y_seq)
@@ -133,9 +138,9 @@ class BaseNode(base.MemoryModule):
 
 class IFNode(BaseNode):
     def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
-                 surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, 
-                 step_mode='s', backend='torch', store_v_seq: bool = False):
-        super().__init__(v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_v_seq)
+                 surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False,
+                 step_mode='s', backend='torch', store_hidden_states: bool = False):
+        super().__init__(v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_hidden_states)
 
     @property
     def supported_backends(self):
@@ -149,115 +154,63 @@ class IFNode(BaseNode):
     def neuronal_charge(self, x: torch.Tensor):
         return if_neuronal_charge(x, self.v)
     
-    @staticmethod
-    @torch.jit.script
-    def jit_eval_single_step_forward(x: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float):
-        h = v + x
-        spike = (h >= v_threshold).to(x) 
-        v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-        return spike, v
-        
-    @staticmethod
-    def jit_eval_multi_step_forward(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float, store_v_seq: bool):
-        @torch.jit.script
-        def multi_step_forward_with_v_seq(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float):
-            spike_seq = []
-            v_seq = []
-            for x in x_seq:
-                h = v + x
-                spike = (h >= v_threshold).to(x) 
-                v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-                spike_seq.append(spike)
-                v_seq.append(v)
-            return torch.stack(spike_seq), v, torch.stack(v_seq)
-        
-        @torch.jit.script
-        def multi_step_forward(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float):
-            spike_seq = []
-            for x in x_seq:
-                h = v + x
-                spike = (h >= v_threshold).to(x) 
-                v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-                spike_seq.append(spike)
-            return torch.stack(spike_seq), v
-        
-        if store_v_seq:
-            return multi_step_forward_with_v_seq(x_seq, v, v_threshold, v_reset)
-        else:
-            return multi_step_forward(x_seq, v, v_threshold, v_reset)
-
     def multi_step_forward(self, x_seq: torch.Tensor):
-        if self.training:
-            if self.backend == 'torch':
-                return super().multi_step_forward(x_seq)
-            elif self.backend == 'triton':
-                forward_kernel, backward_kernel = neuron_backend.IFNode_multi_step_forward_kernel, neuron_backend.IFNode_multi_step_backward_kernel
+        if self.backend == 'torch':
+            return super().multi_step_forward(x_seq)
+        elif self.backend == 'triton':
+            forward_kernel, backward_kernel = neuron_backend.IFNode_multi_step_forward_kernel, neuron_backend.IFNode_multi_step_backward_kernel
 
-                self.v_float_to_tensor(x_seq[0])
-
-                spike_seq, v_seq = neuron_backend.IFNodeMultiStepATGF.apply(
-                                                    x_seq.flatten(1), 
-                                                    self.v.flatten(0),
-                                                    self.v_threshold, self.v_reset,
-                                                    self.detach_reset,
-                                                    self.surrogate_function,
-                                                    forward_kernel,
-                                                    backward_kernel,
-                                                    )
-                
-                spike_seq = spike_seq.reshape(x_seq.shape)
-                v_seq = v_seq.reshape(x_seq.shape)
-
-                if self.store_v_seq:
-                    self.v_seq = v_seq
-
-                self.v = v_seq[-1].clone()
-                return spike_seq
-            else:
-                raise ValueError(self.backend) 
-        else:
             self.v_float_to_tensor(x_seq[0])
-            if self.store_v_seq:
-                spike_seq, self.v, self.v_seq = IFNode.jit_eval_multi_step_forward(x_seq, self.v, self.v_threshold, self.v_reset, self.store_v_seq)
-            else:
-                spike_seq, self.v = IFNode.jit_eval_multi_step_forward(x_seq, self.v, self.v_threshold, self.v_reset, self.store_v_seq)
 
-            return spike_seq   
-        
-    def single_step_forward(self, x: torch.Tensor):
-        if self.training:
-            if self.backend == 'torch':
-                return super().single_step_forward(x)
-            elif self.backend == 'triton':
-                forward_kernel, backward_kernel =  neuron_backend.IFNode_single_step_forward_kernel, neuron_backend.IFNode_single_step_backward_kernel
-
-                self.v_float_to_tensor(x)
-
-                spike, v = neuron_backend.IFNodeSingleStepATGF.apply(
-                                                x.flatten(0),
-                                                self.v.flatten(0),
-                                                self.v_threshold, self.v_reset,
-                                                self.detach_reset,
+            spike_seq, v_seq = neuron_backend.IFNodeMultiStepATGF.apply(
+                                                x_seq.flatten(1), self.v.flatten(0),
+                                                self.training, self.v_threshold,
+                                                self.v_reset, self.detach_reset,
                                                 self.surrogate_function,
                                                 forward_kernel,
                                                 backward_kernel,
-                                                )
-                spike = spike.reshape(x.shape)
-                v = v.reshape(x.shape)
-                
-                self.v = v
-                return spike
-            else:
-                raise ValueError(self.backend)
+                                               )
+            spike_seq = spike_seq.reshape(x_seq.shape)
+            v_seq = v_seq.reshape(x_seq.shape)
+
+            if self.store_hidden_states:
+                self.v_seq = v_seq
+            
+            self.v = v_seq[-1].clone()
+            return spike_seq
+          
+        
         else:
+            raise ValueError(self.backend)
+        
+    def single_step_forward(self, x: torch.Tensor):
+        if self.backend == 'torch':
+            return super().single_step_forward(x)
+        elif self.backend == 'triton':
+            forward_kernel, backward_kernel =  neuron_backend.IFNode_single_step_forward_kernel, neuron_backend.IFNode_single_step_backward_kernel
+
             self.v_float_to_tensor(x)
-            spike, self.v = IFNode.jit_eval_single_step_forward(x, self.v, self.v_threshold, self.v_reset)
+
+            spike, v = neuron_backend.IFNodeSingleStepATGF.apply(
+                                            x.flatten(0),self.v.flatten(0),
+                                            self.training, self.v_threshold, 
+                                            self.v_reset, self.detach_reset,
+                                            self.surrogate_function,
+                                            forward_kernel,
+                                            backward_kernel,
+                                            )
+            spike = spike.reshape(x.shape)
+            v = v.reshape(x.shape)
+            
+            self.v = v
             return spike
+        else:
+            raise ValueError(self.backend)
 
 class LinearNode(BaseNode):
     def __init__(self,a: float=1.0, b:float=1.0, learnable: bool = False, v_threshold: float = 1., v_reset: float = 0., surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False, step_mode = 'm',
-                 backend='torch', store_v_seq: bool = False):
-        super().__init__(v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_v_seq)
+                 backend='torch', store_hidden_states: bool = False):
+        super().__init__(v_threshold, v_reset, surrogate_function, detach_reset, step_mode, backend, store_hidden_states)
       
         self.learnable = learnable
         self.a = torch.as_tensor(a, dtype=torch.float32)
@@ -281,164 +234,180 @@ class LinearNode(BaseNode):
     def neuronal_charge(self, x: torch.Tensor):
         return linear_neuronal_charge(x, self.v, self.a, self.b)
 
-    @staticmethod
-    @torch.jit.script
-    def jit_eval_single_step_forward(x: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float,
-                                     a: float, b: float):
-        h = a * v + b * x
-        spike = (h >= v_threshold).to(x)
-        v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-        return spike, v
-
-    @staticmethod
-    def jit_eval_multi_step_forward(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float,
-                                    a: float, b: float, store_v_seq: bool):
-        @torch.jit.script
-        def multi_step_forward_with_v_seq(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float,
-                                            a: float, b: float):
-                spike_seq = []
-                v_seq = []
-                for x in x_seq:
-                    h = a * v + b * x
-                    spike = (h >= v_threshold).to(x)
-                    v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-                    spike_seq.append(spike)
-                    v_seq.append(v)
-                return torch.stack(spike_seq), v, torch.stack(v_seq)
-        
-        @torch.jit.script
-        def multi_step_forward(x_seq: torch.Tensor, v: torch.Tensor, v_threshold: float, v_reset: float,
-                                a: float, b: float):
-                spike_seq = []
-                for x in x_seq:
-                    h = a * v + b * x
-                    spike = (h >= v_threshold).to(x)
-                    v = h - spike * v_threshold if v_reset is None else v_reset * spike + (1. - spike) * h
-                    spike_seq.append(spike)
-                return torch.stack(spike_seq), v
-        
-        if store_v_seq:
-            return multi_step_forward_with_v_seq(x_seq, v, v_threshold, v_reset, a, b)
-        else:
-            return multi_step_forward(x_seq, v, v_threshold, v_reset, a, b)
-
+  
     def single_step_forward(self, x: torch.Tensor):
-        if self.training:
-            if self.backend == 'torch':
-                return super().single_step_forward(x)
-            elif self.backend == 'triton':
-                forward_kernel, backward_kernel = neuron_backend.LinearNode_single_step_forward_kernel, neuron_backend.LinearNode_single_step_backward_kernel
+        if self.backend == 'torch':
+            return super().single_step_forward(x)
+        elif self.backend == 'triton':
+            forward_kernel, backward_kernel = neuron_backend.LinearNode_single_step_forward_kernel, neuron_backend.LinearNode_single_step_backward_kernel
 
-                self.v_float_to_tensor(x)
-     
-                spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
-                                                x.flatten(0),
+            self.v_float_to_tensor(x)
+    
+            spike, v = neuron_backend.LinearNodeSingleStepATGF.apply(
+                                            x.flatten(0),
+                                            self.v.flatten(0),
+                                            self.a.to(x.device), self.b.to(x.device),
+                                            self.training, self.learnable,
+                                            self.v_threshold, self.v_reset,
+                                            self.detach_reset,
+                                            self.surrogate_function,
+                                            forward_kernel,
+                                            backward_kernel,
+                                            )
+            spike = spike.reshape(x.shape)
+            v = v.reshape(x.shape)
+
+            self.v = v
+            return spike
+        else:
+            raise ValueError(self.backend)
+
+    def multi_step_forward(self, x_seq: torch.Tensor):
+        if self.backend == 'torch':
+            return super().multi_step_forward(x_seq)
+        elif self.backend == 'triton':
+            forward_kernel, backward_kernel = neuron_backend.LinearNode_multi_step_forward_kernel, neuron_backend.LinearNode_multi_step_backward_kernel
+
+            self.v_float_to_tensor(x_seq[0])
+            spike_seq, v_seq = neuron_backend.LinearNodeMultiStepATGF.apply(
+                                                x_seq.flatten(1),
                                                 self.v.flatten(0),
-                                                self.a.to(x.device), self.b.to(x.device), self.learnable,
+                                                self.a.to(x_seq.device), self.b.to(x_seq.device),
+                                                self.training, self.learnable,
                                                 self.v_threshold, self.v_reset,
                                                 self.detach_reset,
                                                 self.surrogate_function,
                                                 forward_kernel,
                                                 backward_kernel,
                                                 )
-                spike = spike.reshape(x.shape)
-                v = v.reshape(x.shape)
+            spike_seq = spike_seq.reshape(x_seq.shape)
+            v_seq = v_seq.reshape(x_seq.shape)
 
-                self.v = v
-                return spike
-            else:
-                raise ValueError(self.backend)
-        else:
-            self.v_float_to_tensor(x)
-            spike, self.v = LinearNode.jit_eval_single_step_forward(x, self.v, self.v_threshold, self.v_reset,
-                                                         self.a, self.b)
-            return spike
-
-    def multi_step_forward(self, x_seq: torch.Tensor):
-        if self.training:
-            if self.backend == 'torch':
-                return super().multi_step_forward(x_seq)
-            elif self.backend == 'triton':
-                forward_kernel, backward_kernel = neuron_backend.LinearNode_multi_step_forward_kernel, neuron_backend.LinearNode_multi_step_backward_kernel
-
-                self.v_float_to_tensor(x_seq[0])
-                spike_seq, v_seq = neuron_backend.LinearNodeMultiStepATGF.apply(
-                                                    x_seq.flatten(1), 
-                                                    self.v.flatten(0),
-                                                    self.a.to(x_seq.device), self.b.to(x_seq.device), self.learnable,
-                                                    self.v_threshold, self.v_reset,
-                                                    self.detach_reset,
-                                                    self.surrogate_function,
-                                                    forward_kernel,
-                                                    backward_kernel,
-                                                    )   
-                spike_seq = spike_seq.reshape(x_seq.shape)
-                v_seq = v_seq.reshape(x_seq.shape)
-
-                if self.store_v_seq:
-                    self.v_seq = v_seq
-                
-                self.v = v_seq[-1].clone()
-                return spike_seq
-            else:
-                raise ValueError(self.backend)
-        else:
-            self.v_float_to_tensor(x_seq[0])
-
-            if self.store_v_seq:
-                spike_seq, self.v, self.v_seq = LinearNode.jit_eval_multi_step_forward(x_seq, self.v, self.v_threshold, self.v_reset,
-                                                                            self.a, self.b, self.store_v_seq)
-            else:
-                spike_seq, self.v = LinearNode.jit_eval_multi_step_forward(x_seq, self.v, self.v_threshold, self.v_reset,
-                                                                self.a, self.b, self.store_v_seq)
-                
+            if self.store_hidden_states:
+                self.v_seq = v_seq
+            
+            self.v = v_seq[-1].clone()
             return spike_seq
+        else:
+            raise ValueError(self.backend)
+
+class ParallelNode(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, tau: int, surrogate_function: Callable = surrogate.Sigmoid()):
+        super().__init__()
+        self.T = T
+        self.tau = tau
+        self.surrogate_function = surrogate_function
+        weight = torch.zeros([T, T])
+        bias = torch.zeros([T, 1])
+
+        self.weight = nn.Parameter(weight)
+        self.bias = nn.Parameter(bias)
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.constant_(self.bias, -1.)
+
+    def forward(self, x_seq: torch.Tensor):
+        h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1)) 
+        spike_seq = self.surrogate_function(h_seq)
+
+        for _ in range(0, self.tau):
+            r = torch.cumsum(h_seq - spike_seq, dim=0)
+            spike_seq = self.surrogate_function(h_seq - r)
+        
+        return spike_seq.view(x_seq.shape)
+    
 
 @torch.no_grad()
 def max_error(x: torch.Tensor, y: torch.Tensor):
     return (x - y).abs().max()
 
+def forward_backward(net: torch.nn.Module, x_seq: torch.Tensor):
+    y_seq = net(x_seq)
+    y_seq.sum().backward()
+    x_seq.grad.zero_()
+    functional.reset_net(net)
+
+
+from spikingjelly.activation_based import neuron,cuda_utils, functional
+
 if __name__ == '__main__':
-    from spikingjelly.activation_based import neuron,cuda_utils, functional
 
     T = 8
     N = 64
     C = 32 * 32 * 32
-    device = 'cuda:2'
-    
+    device = 'cuda:1'
 
-    with torch.cuda.device(device):
-        # for surrogate in surrogate._has_cuda_:
-            # print(surrogate)
-        x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float16)
-        SJ_IFNode = LinearNode(a=1.0, b=1.0, learnable=True, backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='s', store_v_seq=True, )
-        My_IFNode = IFNode(backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='s', store_v_seq=True, )
-
-
-        SJ_IFNode.train()
-        y_SJ_IFNode = SJ_IFNode(x_seq)
-        y_SJ_IFNode.sum().backward()
-        x_grad_SJ_IFNode = x_seq.grad.clone()
+    with torch.cuda.device(device):   
+        x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
+        net = ParallelNode(T, 2, surrogate_function=surrogate.Sigmoid()).to(device)
+        # net.train()
+        y_seq = net(x_seq)
+        y_seq.sum().backward()
+        x_grad = x_seq.grad.clone()
         x_seq.grad.zero_()
-        functional.reset_net(SJ_IFNode)
+        functional.reset_net(net)
 
-        My_IFNode.train()
-        y_My_IFNode = My_IFNode(x_seq)
-        y_My_IFNode.sum().backward()
-        x_grad_My_IFNode = x_seq.grad.clone()
-        x_seq.grad.zero_()
-        functional.reset_net(My_IFNode)
+        net.eval()
+        y_seq = net(x_seq)
+        functional.reset_net(net)
 
-        print(f'max error of y = {max_error(y_My_IFNode, y_SJ_IFNode)}')
-        print(f'max error of x_seq.grad = {max_error(x_grad_My_IFNode, x_grad_SJ_IFNode)}')
+        print(f'max error of y_eval = {max_error(y_seq, y_seq)}')
 
-        SJ_IFNode.eval()
-        y_SJ_IFNode = SJ_IFNode(x_seq)
-        functional.reset_net(SJ_IFNode)
+    # with torch.cuda.device(device):
+    #     x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
+    #     SJ_IFNode = IFNode(backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', store_hidden_states=True, )
+    #     My_IFNode = IFNode(backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', store_hidden_states=True, )
 
-        My_IFNode.eval()
-        y_My_IFNode = My_IFNode(x_seq)
-        functional.reset_net(My_IFNode)
+    #     # SJ_IFNode = LinearNode(a=1.0, b=1.0, learnable=True, backend='triton', surrogate_function=surrogate.Sigmoid(), step_mode='m', store_hidden_states=True, )
+    #     # My_IFNode = LinearNode(a=1.0, b=1.0, learnable=True, backend='torch', surrogate_function=surrogate.Sigmoid(), step_mode='m', store_hidden_states=True, )
 
-        print(f'max error of y_eval = {max_error(y_My_IFNode, y_SJ_IFNode)}')
 
+    #     SJ_IFNode.train()
+    #     y_SJ_IFNode = SJ_IFNode(x_seq)
+    #     y_SJ_IFNode.sum().backward()
+    #     x_grad_SJ_IFNode = x_seq.grad.clone()
+    #     x_seq.grad.zero_()
+    #     functional.reset_net(SJ_IFNode)
+
+    #     My_IFNode.train()
+    #     y_My_IFNode = My_IFNode(x_seq)
+    #     y_My_IFNode.sum().backward()
+    #     x_grad_My_IFNode = x_seq.grad.clone()
+    #     x_seq.grad.zero_()
+    #     functional.reset_net(My_IFNode)
+
+    #     print(f'max error of y = {max_error(y_My_IFNode, y_SJ_IFNode)}')
+    #     print(f'max error of x_seq.grad = {max_error(x_grad_My_IFNode, x_grad_SJ_IFNode)}')
+    #     # print(f'SJ_IFNode.a.grad = {SJ_IFNode.a.grad}, SJ_IFNode.b.grad = {SJ_IFNode.b.grad}')
+    #     # print(f'My_IFNode.a.grad = {My_IFNode.a.grad}, My_IFNode.b.grad = {My_IFNode.b.grad}')
+
+    #     SJ_IFNode.eval()
+    #     y_SJ_IFNode = SJ_IFNode(x_seq)
+    #     functional.reset_net(SJ_IFNode)
+
+    #     My_IFNode.eval()
+    #     y_My_IFNode = My_IFNode(x_seq)
+    #     functional.reset_net(My_IFNode)
+
+    #     print(f'max error of y_eval = {max_error(y_My_IFNode, y_SJ_IFNode)}')
+        
+# if __name__ == '__main__':
+#     N = 64
+#     device = 'cuda:0'
+
+#     repeats = 32
+
+#     for surrogate_function in surrogate._has_cuda_:
+#         print(f'surrogate_function = {surrogate_function}')
+#         net_triton = IFNode(backend='triton', surrogate_function=surrogate_function(), step_mode='m', detach_reset=True)
+#         net_cupy = neuron.IFNode(backend='cupy', surrogate_function=surrogate_function(), step_mode='m', detach_reset=True)
+
+#         for dtype in [torch.half, torch.float]:
+#             for C in [32 * 32, 32 * 32  * 32, 32 * 32 * 32 * 4, 32 * 32 * 32 * 8]:
+#                 print('N * C = ', N * C)
+#                 for T in [2, 4, 8, 16, 32]:
+#                     x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float16)
+
+#                     t_cupy = cuda_utils.cal_fun_t(repeats, device, forward_backward, net_cupy, x_seq)
+#                     t_triton = cuda_utils.cal_fun_t(repeats, device, forward_backward, net_triton, x_seq)
+
+#                     print(f'dtype={dtype}, T={T},'.ljust(30), f'net_cupy / t_triton = {round(t_cupy / t_triton, 2)}')
