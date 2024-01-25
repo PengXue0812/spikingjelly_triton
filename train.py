@@ -288,7 +288,7 @@ def main():
     parser.add_argument('-lr', default=0.1, type=float, help='learning rate')
     parser.add_argument('-channels', default=128, type=int, help='channels of CSNN')
     parser.add_argument('-T', default=4, type=int)
-    parser.add_argument('-tau', default=5, type=int)
+    parser.add_argument('-tau', default=0, type=int)
 
 
 
@@ -341,7 +341,7 @@ def main():
         num_workers=args.j,
         pin_memory=True
     )
-    out_dir = f'T_{args.T}_tau{args.tau}_e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
+    out_dir = f'ParallelNode_T_{args.T}_tau{args.tau}_e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
     if args.amp:
         out_dir += '_amp'
 
@@ -426,6 +426,8 @@ def main():
 
             functional.reset_net(net)
 
+        print(net.fc[2].weight)
+        print(net.fc[2].bias)
         train_time = time.time()
         train_speed = train_samples / (train_time - start_time)
         train_loss /= train_samples

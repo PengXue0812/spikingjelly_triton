@@ -302,19 +302,60 @@ class ParallelNode(nn.Module, base.MultiStepModule):
 
         self.weight = nn.Parameter(weight)
         self.bias = nn.Parameter(bias)
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5)) 
+        nn.init.constant_(self.bias, -1) 
+
+    def forward(self, x_seq: torch.Tensor):
+        h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1)) 
+        s_sum = torch.zeros_like(h_seq)
+        for _ in range(0, self.tau + 1):
+            spike_seq = self.surrogate_function(h_seq - s_sum)
+            s_sum = s_sum + spike_seq
+        return spike_seq.view(x_seq.shape)
+
+        # h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1))
+        # spike_seq_1 = self.surrogate_function(h_seq)
+        # spike_seq_2 = self.surrogate_function(h_seq - spike_seq_1)
+        # spike_seq = spike_seq_1 + spike_seq_2 - spike_seq_1 * spike_seq_2
+        # return spike_seq.view(x_seq.shape)
+    
+class PSN(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.T = T
+        self.surrogate_function = surrogate_function
+        weight = torch.zeros([T, T])
+        bias = torch.zeros([T, 1])
+
+        self.weight = nn.Parameter(weight)
+        self.bias = nn.Parameter(bias)
+
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         nn.init.constant_(self.bias, -1.)
 
     def forward(self, x_seq: torch.Tensor):
-        h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1)) 
+        # x_seq.shape = [T, N, *].
+        h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1))
         spike_seq = self.surrogate_function(h_seq)
-
-        for _ in range(0, self.tau):
-            r = torch.cumsum(h_seq - spike_seq, dim=0)
-            spike_seq = self.surrogate_function(h_seq - r)
-        
         return spike_seq.view(x_seq.shape)
-    
+
+    def extra_repr(self):
+        return super().extra_repr() + f'T={self.T}, '
+
+class N_PSN(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, tau: int,  surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.psn0 = PSN(T, surrogate_function)
+        self.psn1 = PSN(T, surrogate_function)
+
+    def forward(self, x_seq: torch.Tensor):
+        x = self.psn0(x_seq)
+        y = self.psn1(x)
+        y = x + y - x * y
+        return y.view(x_seq.shape)
+
+    def extra_repr(self):
+        return super().extra_repr() + f'T={self.T}, '
 
 @torch.no_grad()
 def max_error(x: torch.Tensor, y: torch.Tensor):
@@ -334,7 +375,7 @@ if __name__ == '__main__':
     T = 8
     N = 64
     C = 32 * 32 * 32
-    device = 'cuda:1'
+    device = 'cuda:0'
 
     with torch.cuda.device(device):   
         x_seq = torch.rand([T, N, C], device=device, requires_grad=True, dtype=torch.float32)
