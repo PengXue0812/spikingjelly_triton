@@ -6,6 +6,8 @@ import spikingjelly.activation_based.surrogate as surrogate
 from spikingjelly.activation_based import base
 import math
 from . import neuron_backend
+import torch.nn.functional as F
+import numpy as np
 # import neuron_backend
 
 # -----------------------
@@ -342,8 +344,8 @@ class PSN(nn.Module, base.MultiStepModule):
     def extra_repr(self):
         return super().extra_repr() + f'T={self.T}, '
 
-class N_PSN(nn.Module, base.MultiStepModule):
-    def __init__(self, T: int, tau: int,  surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+class PSN_OR(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
         super().__init__()
         self.psn0 = PSN(T, surrogate_function)
         self.psn1 = PSN(T, surrogate_function)
@@ -356,6 +358,145 @@ class N_PSN(nn.Module, base.MultiStepModule):
 
     def extra_repr(self):
         return super().extra_repr() + f'T={self.T}, '
+
+class DropoutPSN(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.T = T
+        self.surrogate_function = surrogate_function
+        weight = torch.zeros([T, T])
+        bias = torch.zeros([T, 1])
+
+        self.weight = nn.Parameter(weight)
+        self.bias = nn.Parameter(bias)
+
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.constant_(self.bias, -1.)
+
+
+    # @staticmethod
+    def drop_time_step_mask(T: int, T_drop: int, device): # 返回一个shape=[T]的mask，其中有T_drop个元素为0，剩余T - T_drop个元素为T / (T - T_drop)
+        print("-------------")
+        print(T)
+        mask = torch.empty([T], device=device)
+        nn.init.constant_(mask, T / (T - T_drop))
+        mask0 = np.random.choice(T, T_drop, replace=False)
+        mask[mask0] = 0.
+        return mask
+
+    def forward(self, x_seq: torch.Tensor):
+        if self.training:
+            mask = DropoutPSN.drop_time_step_mask(self.T, self.T // 4, x_seq.device)
+            print(mask)
+            weight = self.weight * mask
+            h_seq = torch.addmm(self.bias, weight, x_seq.flatten(1))
+            spike_seq = self.surrogate_function(h_seq)
+            return spike_seq.view(x_seq.shape)
+        else:
+            h_seq = torch.addmm(self.bias, self.weight, x_seq.flatten(1))
+            spike_seq = self.surrogate_function(h_seq)
+            return spike_seq.view(x_seq.shape)
+    
+
+    def extra_repr(self):
+        return super().extra_repr() + f'T={self.T}, '
+
+class DropoutPSN_OR(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.psn0 = DropoutPSN(T, surrogate_function)
+        self.psn1 = PSN(T, surrogate_function)
+
+    def forward(self, x_seq: torch.Tensor):
+        x = self.psn0(x_seq)
+        y = self.psn1(x)
+        y = x + y - x * y
+        return y.view(x_seq.shape)
+
+    def extra_repr(self):
+        return super().extra_repr() + f'T={self.T}, '
+
+class PSN_G(nn.Module, base.MultiStepModule):
+    def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.T = T
+        self.surrogate_function = surrogate_function
+        weight = torch.zeros([T, T])
+        bias = torch.zeros([T, 1])
+        G = torch.zeros([1, T])
+        self.weight = nn.Parameter(weight)
+        self.bias = nn.Parameter(bias)
+        self.G = nn.Parameter(G)
+
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.constant_(self.bias, -1.)
+        nn.init.constant_(self.G, 1.)
+
+    def forward(self, x_seq: torch.Tensor):
+        weight = self.weight * self.G.sigmoid() 
+        h_seq = torch.addmm(self.bias, weight, x_seq.flatten(1))
+        spike_seq = self.surrogate_function(h_seq)
+        return spike_seq.view(x_seq.shape)
+
+    def extra_repr(self):
+        return super().extra_repr() + f'T={self.T}, '\
+        
+
+class ParameterPSN(nn.Module, base.MultiStepModule):
+    def __init__(self, tau: int, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+        super().__init__()
+        self.T = T
+        self.tau = tau
+        self.surrogate_function = surrogate_function
+
+        weight_a = torch.zeros([T, tau])
+        weight_b = torch.zeros([tau, T])
+        bias = torch.zeros([T, 1])
+
+        self.weight_a = nn.Parameter(weight_a)
+        self.weight_b = nn.Parameter(weight_b)
+        self.bias = nn.Parameter(bias)
+        
+        lam = math.sqrt(3 / math.sqrt(3 * T * tau))
+        nn.init.uniform_(self.weight_a, -lam, lam)
+        nn.init.uniform_(self.weight_b, -lam, lam)
+        nn.init.constant_(self.bias, -1.)
+
+    def forward(self, x_seq: torch.Tensor):
+        weight = self.weight_a @ self.weight_b
+        h_seq = torch.addmm(self.bias, weight, x_seq.flatten(1))    
+        spike_seq = self.surrogate_function(h_seq)
+        return spike_seq.view(x_seq.shape)
+    
+# class T1PSN(nn.Module, base.SingleModule):
+#     def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
+#         super().__init__()
+#         self.T = T
+#         self.surrogate_function = surrogate_function
+#         weight1 = torch.zeros([T, 1])
+#         bias1 = torch.zeros([1])
+
+#         weight2 = torch.zeros([1, T])
+#         bias2 = torch.zeros([1])
+        
+#         self.weight1 = nn.Parameter(weight1)
+#         self.bias1 = nn.Parameter(bias1)
+#         self.weight2 = nn.Parameter(weight2)
+#         self.bias2 = nn.Parameter(bias2)    
+
+#         nn.init.kaiming_uniform_(self.weight1, a=math.sqrt(5))
+#         nn.init.constant_(self.bias1, -1.)
+#         nn.init.kaiming_uniform_(self.weight2, a=math.sqrt(5))
+#         nn.init.constant_(self.bias2, -1.)
+
+#     def forward(self, x: torch.Tensor):
+#         h = torch.addmm(self.bias1, self.weight1, x.flatten(0).unsqueeze(0))
+#         spike = self.surrogate_function(h)
+#         out = torch.addmm(self.bias2, self.weight2, spike)
+#         return out.view(x.shape)
+
+#     def extra_repr(self):
+#         return super().extra_repr() + f'T={self.T}, '
 
 @torch.no_grad()
 def max_error(x: torch.Tensor, y: torch.Tensor):
