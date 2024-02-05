@@ -1,0 +1,2 @@
+Namespace(device='cuda:1', b=128, epochs=128, j=4, data_dir='./datasets/CIFAR10', out_dir='./logs', resume='./logs/pt/logs/CIFAR10_T4_P3_e128_b128_sgd_lr0.1_c128_peNone_amp/checkpoint_latest.pth', amp=True, opt='sgd', momentum=0.9, lr=0.1, channels=128, T=4, P=3, pe=None)
+train_cf10.py -data-dir ./datasets/CIFAR10 -amp -opt sgd -channels 128 -epochs 128 -T 4 -P 3 -device cuda:1 -resume ./logs/pt/logs/CIFAR10_T4_P3_e128_b128_sgd_lr0.1_c128_peNone_amp/checkpoint_latest.pth

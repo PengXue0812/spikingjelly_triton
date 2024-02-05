@@ -284,12 +284,11 @@ def main():
     parser.add_argument('-T', type=int, default=32, help='the time steps of the masked/sliding PSN')
     parser.add_argument('-P', type=int, default=None, help='the order of the masked/sliding PSN')
 
-
     args = parser.parse_args()
     print(args)
 
     mixup_transforms = []
-    mixup_transforms.append(RandomMixup(args.class_num, p=1.0, alpha=0.2))
+    mixup_transforms.append(RandomMixup(args.class_num, p=1.0, alpha=0.2)) # 
     mixup_transforms.append(RandomCutmix(args.class_num, p=1.0, alpha=1.))
     mixupcutmix = torchvision.transforms.RandomChoice(mixup_transforms)
     collate_fn = lambda batch: mixupcutmix(*default_collate(batch))  # noqa: E731
@@ -405,8 +404,6 @@ def main():
         max_test_acc = checkpoint['max_test_acc']
         print(max_test_acc)
 
-
-
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
         print(f'Mkdir {out_dir}.')
@@ -417,8 +414,6 @@ def main():
         args_txt.write(str(args))
         args_txt.write('\n')
         args_txt.write(' '.join(sys.argv))
-
-
 
     for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
