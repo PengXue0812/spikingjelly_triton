@@ -467,7 +467,89 @@ class ParameterPSN(nn.Module, base.MultiStepModule):
         h_seq = torch.addmm(self.bias, weight, x_seq.flatten(1))    
         spike_seq = self.surrogate_function(h_seq)
         return spike_seq.view(x_seq.shape)
-    
+
+
+# class MaskedPSN(base.MemoryModule):
+#     @staticmethod
+#     @torch.jit.script
+#     def gen_masked_weight(lambda_: torch.Tensor, mask0: torch.Tensor, mask1: torch.Tensor, weight: torch.Tensor):
+#         return (lambda_ * mask0 + (1. - lambda_) * mask1) * weight
+
+#     def masked_weight(self):
+#         if self.lambda_ >= 1.:
+#             return self.weight * self.mask0
+#         else:
+#             return self.gen_masked_weight(self.lambda_, self.mask0, self.mask1, self.weight)
+
+#     def __init__(self, k: int, T: int, lambda_init: float = 0.,
+#                  surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan(), step_mode: str = 's'):
+#         super().__init__()
+#         self.register_memory('time_step', 0)
+#         self.register_memory('queue', [])
+#         self.step_mode = step_mode
+#         self.k = k
+#         self.T = T
+#         self.surrogate_function = surrogate_function
+#         weight = torch.zeros([T, T])
+#         bias = torch.zeros([T, 1])
+#         self.register_buffer('_lambda_', torch.as_tensor(lambda_init))
+
+#         self.weight = nn.Parameter(weight)
+#         self.bias = nn.Parameter(bias)
+
+#         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+#         nn.init.constant_(self.bias, -1.)
+
+#         mask1 = torch.ones([T, T])
+#         mask0 = torch.tril(mask1) * torch.triu(mask1, -(self.k - 1))
+#         self.register_buffer('mask0', mask0)
+#         self.register_buffer('mask1', mask1)
+
+#     def single_step_forward(self, x: torch.Tensor):
+#         if self.lambda_ < 1.:
+#             raise ValueError("The masked PSN can not work in single-step mode when k < 1!")
+
+#         self.queue.append(x.flatten())
+#         if self.queue.__len__() > self.k:
+#             self.queue.pop(0)
+
+#         if self.time_step + 1 > self.T:
+#             raise OverflowError(f"The MaskedPSN(T={self.T}) has run {self.time_step + 1} time-steps!")
+
+
+#         weight = self.masked_weight()[self.time_step, self.time_step + 1 - self.queue.__len__(): self.time_step + 1]
+#         x_seq = torch.stack(self.queue)
+
+
+
+#         for i in range(x.dim()):
+#             weight = weight.unsqueeze(-1)
+
+
+#         h = torch.sum(weight * x_seq, 0)
+#         spike = self.surrogate_function(h + self.bias[self.time_step])
+
+#         self.time_step += 1
+#         return spike.view(x.shape)
+
+#     def multi_step_forward(self, x_seq: torch.Tensor):
+#         # x_seq.shape = [T, N, *]
+#         assert x_seq.shape[0] == self.T
+#         h_seq = torch.addmm(self.bias, self.masked_weight(), x_seq.flatten(1))
+#         spike_seq = self.surrogate_function(h_seq).view(x_seq.shape)
+#         return spike_seq
+
+#     @property
+#     def lambda_(self):
+#         return self._lambda_
+
+#     @lambda_.setter
+#     def lambda_(self, value: float):
+#         torch.fill_(self.lambda_, value)
+
+#     def extra_repr(self):
+#         return super().extra_repr() + f', lambda_={self.lambda_}, T={self.T}'
+
 # class T1PSN(nn.Module, base.SingleModule):
 #     def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
 #         super().__init__()

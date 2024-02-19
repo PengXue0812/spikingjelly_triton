@@ -319,7 +319,6 @@ class CIFAR10Net(nn.Module):
             return self.fc(self.conv(x_seq))
 
 
-
 def params(net: nn.Module):
     n = 0
     for p in net.parameters():
