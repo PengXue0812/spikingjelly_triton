@@ -241,7 +241,7 @@ class IFNodeSingleStepATGF(torch.autograd.Function):
 
 class IFNodeMultiStepATGF(torch.autograd.Function): 
     @staticmethod
-    def forward(ctx, x_seq: torch.Tensor, v_init: torch.Tensor, training: bool, v_th: float, v_reset: float or None, detach_reset: bool,
+    def forward(ctx, x_seq: torch.Tensor, v_init: torch.Tensor, training: bool, v_th: float, v_reset: float or None, detach_reset: bool, # type: ignore
                 surrogate_function, forward, backward):
         py_dict = {
             'x_seq_ptr': x_seq,
@@ -516,7 +516,7 @@ class LinearNodeMultiStepATGF(torch.autograd.Function):
         forward[grid](**py_dict)
 
         if training:
-            ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][0], py_dict['x_seq_ptr'],
+            ctx_save(ctx, requires_grad,  py_dict['h_seq_ptr'],  py_dict['a_ptr'], py_dict['b_ptr'], py_dict['v_v_seq_ptr'][:-1], py_dict['x_seq_ptr'],
                     learnable=learnable, grid=grid, numel=py_dict['numel'], detach_reset=detach_reset,
                     N=py_dict['N'], T=py_dict['T'],v_th=py_dict['v_th'], 
                     v_reset=py_dict['v_reset'],backward=backward,
@@ -604,9 +604,9 @@ def LinearNode_multi_step_backward_kernel(
     grad_a_ptr, # [1] output
     grad_b_ptr, # [1] output
     grad_spike_seq_ptr, # [T, N]
-    grad_v_init_ptr, # [N] ,output
+    grad_v_init_ptr, # [N] , output
     grad_v_seq_ptr, # [T, N]
-    grad_x_seq_ptr, # [T, N] ,output
+    grad_x_seq_ptr, # [T, N], output
     h_seq_ptr, # [T, N] 
     a_ptr, # [1] 
     b_ptr, # [1]
