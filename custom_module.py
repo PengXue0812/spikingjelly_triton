@@ -30,7 +30,8 @@ class SpearablePSN(nn.Module):
         spike_seq = self.surrogate_function(h_seq)
         return spike_seq
 
-def conv_bn_infer_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm1d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
+
+def conv_bn_infer_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm2d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
     if bn is not None:
         assert conv.bias is None
 
@@ -62,7 +63,7 @@ def conv_bn_infer_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm
     return spearable_psn(functional.seq_to_ann_forward(x_seq, mds), offset)
 
 
-def conv_bn_train_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm1d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
+def conv_bn_train_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm2d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
     if bn is not None:
         assert conv.bias is None
 
@@ -86,7 +87,7 @@ def conv_bn_train_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm
     spike_seq = spearable_psn.surrogate_function(h_seq)
     return spike_seq
 
-def conv_bn_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm1d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
+def conv_bn_forward(x_seq: torch.Tensor, conv: nn.Conv2d, bn: nn.BatchNorm2d or None, spearable_psn: SpearablePSN, pre_unbiased_layers: nn.Module = None):
     if spearable_psn.training:
         return conv_bn_train_forward(x_seq, conv, bn, spearable_psn, pre_unbiased_layers)
     else:
@@ -178,3 +179,99 @@ def general_forward(x_seq: torch.Tensor, linear_layers: nn.Module or tuple, spea
         return general_train_forward(x_seq, linear_layers, spearable_psn)
     else:
         return general_infer_forward(x_seq, linear_layers, spearable_psn)
+
+if __name__ == '__main__':
+    from spikingjelly.activation_based import layer, neuron
+
+
+    def create_neu(T: int, P: int):
+        if P > 0:
+            return SpearablePSN(T=T, P=P, surrogate_function=surrogate.ATan())
+        else:
+            return neuron.PSN(T=T, surrogate_function=surrogate.ATan())
+    class CIFAR10Net(nn.Module):
+        def __init__(self, channels, T: int, P: int, pe: str = None):
+            super().__init__()
+            self.T = T
+            self.P = P
+            conv = []
+            for i in range(2):
+                for j in range(3):
+                    if conv.__len__() == 0:
+                        in_channels = 3
+                    else:
+                        in_channels = channels
+                    conv.append(layer.Conv2d(in_channels, channels, kernel_size=3, padding=1, bias=False))
+                    conv.append(layer.BatchNorm2d(channels))
+                    conv.append(create_neu(T=T, P=P))
+
+                conv.append(layer.AvgPool2d(2, 2))
+
+            self.conv = nn.Sequential(*conv)
+
+            self.fc = nn.Sequential(
+                layer.Flatten(),
+                layer.Linear(channels * 8 * 8, channels * 8 * 8 // 4),
+                create_neu(T=T, P=P),
+                layer.Linear(channels * 8 * 8 // 4, 10),
+            )
+
+            if P > 0:
+                functional.set_step_mode(self, 's')
+            else:
+                functional.set_step_mode(self, 'm')
+
+            self.pe = None
+            if pe is not None:
+                # T, N, C, H, W
+                pe_shape = [
+                    [1, 1, 1, 1, 1],
+                    [T, 1, 3, 32, 32]
+                ]
+                shape = []
+                for i in range(pe.__len__()):
+                    shape.append(pe_shape[int(pe[i])][i])
+
+                self.pe = torch.zeros(shape)
+
+                torch.nn.init.trunc_normal_(self.pe, std=0.02)
+                self.pe = nn.Parameter(self.pe)
+
+        def forward(self, x_seq: torch.Tensor):
+            if self.pe is not None:
+                x_seq = x_seq + self.pe
+            else:
+                x_seq = x_seq.unsqueeze(0).repeat(self.T, 1, 1, 1, 1)
+
+            if self.P > 0:
+                i_last = 0
+                for i in range(self.conv.__len__()):
+                    if isinstance(self.conv[i], SpearablePSN):
+                        if isinstance(self.conv[i_last], nn.Conv2d):
+                            x_seq = conv_bn_forward(x_seq, self.conv[i_last], self.conv[i_last + 1],
+                                                                  self.conv[i_last + 2])
+                        else:
+                            assert isinstance(self.conv[i_last], nn.AvgPool2d)
+                            x_seq = conv_bn_forward(x_seq, self.conv[i_last + 1], self.conv[i_last + 2],
+                                                                  self.conv[i_last + 3], self.conv[i_last])
+                        i_last = i + 1
+
+                x_seq = linear_forward(x_seq, self.fc[1], self.fc[2],
+                                                     nn.Sequential(self.conv[i_last], self.fc[0]))
+                x_seq = self.fc[3](x_seq)
+                return x_seq
+
+            else:
+                return self.fc(self.conv(x_seq))
+
+    T = 4
+    N = 2
+    P = 2
+    net = CIFAR10Net(channels=32, T=T, P=P)
+
+    net.train()
+    with torch.no_grad():
+        img = torch.rand([N, 3, 32, 32])
+        y = net(img).mean(0)
+
+    exit()

@@ -62,7 +62,6 @@ class BaseNode(base.MemoryModule):
         assert isinstance(detach_reset, bool)
         super().__init__()
 
-        
         if v_reset is None:
             self.register_memory('v', 0.)
         else:
@@ -91,7 +90,6 @@ class BaseNode(base.MemoryModule):
                 self.register_memory('v_seq', None)
             if not hasattr(self, 'h_seq'):
                 self.register_memory('h_seq', None)
-
 
     @abstractmethod
     def neuronal_charge(self, x: torch.Tensor):
@@ -347,8 +345,14 @@ class PSN(nn.Module, base.MultiStepModule):
 class PSN_OR(nn.Module, base.MultiStepModule):
     def __init__(self, T: int, surrogate_function: surrogate.SurrogateFunctionBase = surrogate.ATan()):
         super().__init__()
+        # self.psn0 = PSN(T, surrogate_function)
+        # self.psn1 = PSN(T, surrogate_function)
+
+        lam = math.sqrt(3 / math.sqrt(3 * T * T))
         self.psn0 = PSN(T, surrogate_function)
         self.psn1 = PSN(T, surrogate_function)
+        nn.init.uniform_(self.psn0.weight, -lam, lam)
+        nn.init.uniform_(self.psn1.weight, -lam, lam)
 
     def forward(self, x_seq: torch.Tensor):
         x = self.psn0(x_seq)
@@ -469,6 +473,11 @@ class ParameterPSN(nn.Module, base.MultiStepModule):
         return spike_seq.view(x_seq.shape)
 
 
+from math import sqrt
+ 
+import torch
+import torch.nn as nn
+ 
 # class MaskedPSN(base.MemoryModule):
 #     @staticmethod
 #     @torch.jit.script

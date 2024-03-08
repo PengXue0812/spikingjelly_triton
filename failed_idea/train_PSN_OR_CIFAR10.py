@@ -3,8 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-import neuron_new.neuron as neuron
 from torchvision import transforms
+import neuron_new.neuron as neuron
+# from spikingjelly.activation_based import neuron
 from spikingjelly.activation_based import functional, surrogate, layer
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -13,8 +14,10 @@ import argparse
 from torch.cuda import amp
 import sys
 import datetime
-import custom_module
 
+from torch.utils.data.dataloader import default_collate
+from torchvision.transforms import autoaugment, transforms
+from torchvision.transforms.functional import InterpolationMode
 
 _seed_ = 2020
 import random
@@ -26,37 +29,34 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 
-from torch.utils.data.dataloader import default_collate
-from torchvision.transforms import autoaugment, transforms
-from torchvision.transforms.functional import InterpolationMode
 class ClassificationPresetTrain:
     def __init__(
         self,
         mean=(0.485, 0.456, 0.406),
         std=(0.229, 0.224, 0.225),
-        interpolation=InterpolationMode.BILINEAR,
-        hflip_prob=0.5,
-        auto_augment_policy=None,
-        random_erase_prob=0.0,
+        interpolation=InterpolationMode.BILINEAR, # interpolation：插值方法
+        hflip_prob=0.5, # 水平翻转的概率
+        auto_augment_policy=None, # auto_augment_policy：自动增强策略 
+        random_erase_prob=0.0, # 随机擦除的概率
     ):
         trans = []
-        if hflip_prob > 0:
+        if hflip_prob > 0: # 如果水平翻转的概率大于0
             trans.append(transforms.RandomHorizontalFlip(hflip_prob))
         if auto_augment_policy is not None:
-            if auto_augment_policy == "ra":
+            if auto_augment_policy == "ra": # ra：RandAugment
                 trans.append(autoaugment.RandAugment(interpolation=interpolation))
-            elif auto_augment_policy == "ta_wide":
+            elif auto_augment_policy == "ta_wide": # ta_wide：TrivialAugmentWide
                 trans.append(autoaugment.TrivialAugmentWide(interpolation=interpolation))
             else:
-                aa_policy = autoaugment.AutoAugmentPolicy(auto_augment_policy)
+                aa_policy = autoaugment.AutoAugmentPolicy(auto_augment_policy) # auto_augment_policy：自动增强策略
                 trans.append(autoaugment.AutoAugment(policy=aa_policy, interpolation=interpolation))
-        trans.extend(
+        trans.extend( # extend：在列表末尾一次性追加另一个序列中的多个值
             [
                 transforms.PILToTensor(),
                 transforms.ConvertImageDtype(torch.float),
                 transforms.Normalize(mean=mean, std=std),
             ]
-        )
+        ) # PILToTensor：将PIL图像转换为张量；ConvertImageDtype：将图像转换为给定的数据类型；Normalize：标准化图像
         if random_erase_prob > 0:
             trans.append(transforms.RandomErasing(p=random_erase_prob))
 
@@ -67,7 +67,7 @@ class ClassificationPresetTrain:
 
 from torch import Tensor
 from typing import Tuple
-class RandomMixup(torch.nn.Module):
+class RandomMixup(torch.nn.Module): # p
     """Randomly apply Mixup to the provided batch and targets.
     The class implements the data augmentations as described in the paper
     `"mixup: Beyond Empirical Risk Minimization" <https://arxiv.org/abs/1710.09412>`_.
@@ -99,22 +99,22 @@ class RandomMixup(torch.nn.Module):
         Returns:
             Tensor: Randomly transformed batch.
         """
-        if batch.ndim != 4:
+        if batch.ndim != 4: # 
             raise ValueError(f"Batch ndim should be 4. Got {batch.ndim}")
         if target.ndim != 1:
             raise ValueError(f"Target ndim should be 1. Got {target.ndim}")
-        if not batch.is_floating_point():
+        if not batch.is_floating_point(): 
             raise TypeError(f"Batch dtype should be a float tensor. Got {batch.dtype}.")
         if target.dtype != torch.int64:
             raise TypeError(f"Target dtype should be torch.int64. Got {target.dtype}")
 
-        if not self.inplace:
+        if not self.inplace: 
             batch = batch.clone()
             target = target.clone()
 
         if target.ndim == 1:
-            target = torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(dtype=batch.dtype)
-
+            target = torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(dtype=batch.dtype) # 
+ 
         if torch.rand(1).item() >= self.p:
             return batch, target
 
@@ -123,11 +123,11 @@ class RandomMixup(torch.nn.Module):
         target_rolled = target.roll(1, 0)
 
         # Implemented as on mixup paper, page 3.
-        lambda_param = float(torch._sample_dirichlet(torch.tensor([self.alpha, self.alpha]))[0])
-        batch_rolled.mul_(1.0 - lambda_param)
-        batch.mul_(lambda_param).add_(batch_rolled)
+        lambda_param = float(torch._sample_dirichlet(torch.tensor([self.alpha, self.alpha]))[0]) #
+        batch_rolled.mul_(1.0 - lambda_param)  
+        batch.mul_(lambda_param).add_(batch_rolled)  
 
-        target_rolled.mul_(1.0 - lambda_param)
+        target_rolled.mul_(1.0 - lambda_param) 
         target.mul_(lambda_param).add_(target_rolled)
 
         return batch, target
@@ -191,22 +191,22 @@ class RandomCutmix(torch.nn.Module):
         if target.ndim == 1:
             target = torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(dtype=batch.dtype)
 
-        if torch.rand(1).item() >= self.p:
+        if torch.rand(1).item() >= self.p:  
             return batch, target
 
         # It's faster to roll the batch by one instead of shuffling it to create image pairs
-        batch_rolled = batch.roll(1, 0)
+        batch_rolled = batch.roll(1, 0) # 将batch沿着0轴向右滚动1个单位
         target_rolled = target.roll(1, 0)
 
         # Implemented as on cutmix paper, page 12 (with minor corrections on typos).
         lambda_param = float(torch._sample_dirichlet(torch.tensor([self.alpha, self.alpha]))[0])
-        W, H = torchvision.transforms.functional.get_image_size(batch)
+        W, H = torchvision.transforms.functional.get_image_size(batch) # 获取图像的宽和高
 
-        r_x = torch.randint(W, (1,))
-        r_y = torch.randint(H, (1,))
+        r_x = torch.randint(W, (1,)) # 从[0, W)中随机生成一个整数
+        r_y = torch.randint(H, (1,)) # 从[0, H)中随机生成一个整数
 
-        r = 0.5 * math.sqrt(1.0 - lambda_param)
-        r_w_half = int(r * W)
+        r = 0.5 * math.sqrt(1.0 - lambda_param) 
+        r_w_half = int(r * W) 
         r_h_half = int(r * H)
 
         x1 = int(torch.clamp(r_x - r_w_half, min=0))
@@ -233,10 +233,9 @@ class RandomCutmix(torch.nn.Module):
         )
         return s
 
-class CIFAR100Net(nn.Module):
-    def __init__(self, channels, T: int):
+class CIFAR10Net(nn.Module):
+    def __init__(self, channels, T):
         super().__init__()
-        self.T = T
         conv = []
         for i in range(2):
             for j in range(3):
@@ -244,9 +243,9 @@ class CIFAR100Net(nn.Module):
                     in_channels = 3
                 else:
                     in_channels = channels
-                conv.append(layer.Conv2d(in_channels, channels, kernel_size=3, padding=1, bias=False))
+                conv.append(layer.Conv2d(in_channels, channels, kernel_size=3, padding=1, bias=False)) 
                 conv.append(layer.BatchNorm2d(channels))
-                conv.append(custom_module.T1PSN(T=T, surrogate_function=surrogate.ATan()))
+                conv.append(neuron.PSN_OR(T=T,surrogate_function=surrogate.ATan()))
 
             conv.append(layer.AvgPool2d(2, 2))
 
@@ -256,14 +255,15 @@ class CIFAR100Net(nn.Module):
         self.fc = nn.Sequential(
             layer.Flatten(),
             layer.Linear(channels * 8 * 8, channels * 8 * 8 // 4),
-            custom_module.T1PSN(T=T, surrogate_function=surrogate.ATan()),
-            layer.Linear(channels * 8 * 8 // 4, 100),
+            neuron.PSN_OR(T=T,surrogate_function=surrogate.ATan()),
+            layer.Linear(channels * 8 * 8 // 4, 10),
         )
 
-        functional.set_step_mode(self, 's')
+        functional.set_step_mode(self, 'm')
 
     def forward(self, x_seq: torch.Tensor):
         return self.fc(self.conv(x_seq))
+
 
 def params(net: nn.Module):
     n = 0
@@ -275,19 +275,19 @@ def params(net: nn.Module):
 def main():
     # channels = 128, params = 17542026
     '''
-    python train_T1PSN_single_infer_CIFAR100.py -data-dir ./datasets/CIFAR100 -amp -opt sgd -channels 128 -epochs 128 -T 4 -device cuda:1
+    python train_PSN_OR_CIFAR10.py -data-dir ./datasets/CIFAR10 -amp -opt sgd -channels 128 -epochs 128
     '''
     # print(params(CIFAR10Net(128)))
     # exit()
     parser = argparse.ArgumentParser(description='Classify Fashion-MNIST')
-    parser.add_argument('-device', default='cuda:0', help='device')
+    parser.add_argument('-device', default='cuda:4', help='device')
     parser.add_argument('-b', default=128, type=int, help='batch size')
     parser.add_argument('-epochs', default=64, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('-j', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
     parser.add_argument('-data-dir', type=str, help='root dir of Fashion-MNIST dataset')
-    parser.add_argument('-out-dir', type=str, default='./logs', help='root dir for saving logs and checkpoint')
+    parser.add_argument('-out-dir', type=str, default='./logs2', help='root dir for saving logs and checkpoint')
     parser.add_argument('-resume', type=str, help='resume from the checkpoint path')
     parser.add_argument('-amp', action='store_true', help='automatic mixed precision training')
     parser.add_argument('-opt', type=str, help='use which optimizer. SDG or Adam')
@@ -297,12 +297,13 @@ def main():
     parser.add_argument('-T', default=4, type=int)
 
 
+
     args = parser.parse_args()
     print(args)
 
     mixup_transforms = []
-    mixup_transforms.append(RandomMixup(100, p=1.0, alpha=0.2))
-    mixup_transforms.append(RandomCutmix(100, p=1.0, alpha=1.))
+    mixup_transforms.append(RandomMixup(10, p=1.0, alpha=0.2))
+    mixup_transforms.append(RandomCutmix(10, p=1.0, alpha=1.))
     mixupcutmix = torchvision.transforms.RandomChoice(mixup_transforms)
     collate_fn = lambda batch: mixupcutmix(*default_collate(batch))  # noqa: E731
 
@@ -316,17 +317,17 @@ def main():
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    train_set = torchvision.datasets.CIFAR100(
+    train_set = torchvision.datasets.CIFAR10(
             root=args.data_dir,
             train=True,
             transform=transform_train,
-            download=True)
+            download=False)
 
-    test_set = torchvision.datasets.CIFAR100(
+    test_set = torchvision.datasets.CIFAR10(
             root=args.data_dir,
             train=False,
             transform=transform_test,
-            download=True)
+            download=False)
 
     train_data_loader = torch.utils.data.DataLoader(
         dataset=train_set,
@@ -346,17 +347,16 @@ def main():
         num_workers=args.j,
         pin_memory=True
     )
-    out_dir = f'CIFAR100_T1PSN_single_infer_T_{args.T}e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
+    out_dir = f'CIFAR10_PSN_OR_T_{args.T}_e{args.epochs}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}'
     if args.amp:
         out_dir += '_amp'
-
 
     out_dir = os.path.join(args.out_dir, out_dir)
     pt_dir = os.path.join(args.out_dir, 'pt', out_dir)
     if not os.path.exists(pt_dir):
         os.makedirs(pt_dir)
 
-    net = CIFAR100Net(args.channels, T=args.T)
+    net = CIFAR10Net(args.channels, args.T)
     net.to(args.device)
 
     if args.T == 1:
@@ -400,27 +400,31 @@ def main():
         args_txt.write(' '.join(sys.argv))
 
     for epoch in range(start_epoch, args.epochs):
-        functional.set_step_mode(net, 's')
         start_time = time.time()
         net.train()
         train_loss = 0
         train_acc = 0
         train_samples = 0
         for img, label in train_data_loader:
-            optimizer.zero_grad() 
+            optimizer.zero_grad()
             img = img.to(args.device)
             label = label.to(args.device)
-            with torch.cuda.amp.autocast(enabled=scaler is not None):
-                y = net(img)
-                loss = F.cross_entropy(y, label, label_smoothing=0.1)
+
+            with torch.cuda.device(args.device):
+                with torch.cuda.amp.autocast(enabled=scaler is not None):
+                    img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
+                    y = net(img).mean(0)
+                    loss = F.cross_entropy(y, label, label_smoothing=0.1)
+
 
             if scaler is not None:
-                scaler.scale(loss).backward()
+                scaler.scale(loss).backward() 
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
                 optimizer.step()
+
 
             train_samples += label.shape[0]
             train_loss += loss.item() * label.shape[0]
@@ -437,7 +441,6 @@ def main():
         writer.add_scalar('train_acc', train_acc, epoch)
         lr_scheduler.step()
 
-        # functional.set_step_mode(net, 'm')
         net.eval()
         test_loss = 0
         test_acc = 0
@@ -446,9 +449,9 @@ def main():
             for img, label in test_data_loader:
                 img = img.to(args.device)
                 label = label.to(args.device)
-                # img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
-                # y = net(img).mean(0)
-                y = net(img)
+                img = img.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)
+            
+                y = net(img).mean(0)
                 loss = F.cross_entropy(y, label)
                 test_samples += label.numel()
                 test_loss += loss.item() * label.numel()
@@ -484,8 +487,6 @@ def main():
         print(f'epoch = {epoch}, train_loss ={train_loss: .4f}, train_acc ={train_acc: .4f}, test_loss ={test_loss: .4f}, test_acc ={test_acc: .4f}, max_test_acc ={max_test_acc: .4f}')
         print(f'train speed ={train_speed: .4f} images/s, test speed ={test_speed: .4f} images/s')
         print(f'escape time = {(datetime.datetime.now() + datetime.timedelta(seconds=(time.time() - start_time) * (args.epochs - epoch))).strftime("%Y-%m-%d %H:%M:%S")}\n')
-
-
 
 if __name__ == '__main__':
     main()

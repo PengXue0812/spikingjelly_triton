@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+    {
+        "name": "Launch Edge",
+        "request": "launch",
+        "type": "msedge",
+        "url": "http://localhost:8080",
+        "webRoot": "${workspaceFolder}", 
+        
+    },
+        {
+            "name": "Python: 当前文件",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "-data-dir","./datasets/CIFAR10/",
+                "-opt","sgd",
+                "-channels","128",
+            ]
+        }
+    ]
+}
